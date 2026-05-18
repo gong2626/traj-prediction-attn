@@ -1,0 +1,17 @@
+artifacts/
+data/
+regional_forecast/data/
+
+__pycache__/
+*.py[cod]
+*.so
+
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+.autodl/
+.Trash-0/
+
+.DS_Store
+Thumbs.db

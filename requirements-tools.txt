@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Optional dependencies for online Folium/Leaflet map rendering.
+# Offline SVG HTML rendering in tools/render_example_images.py only needs requirements.txt.
+folium>=0.17
