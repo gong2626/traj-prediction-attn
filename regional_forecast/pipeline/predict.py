@@ -21,10 +21,15 @@ from regional_forecast.data.preprocess import (
     attach_aircraft_metadata,
 )
 from regional_forecast.data.regionizer import H3Regionizer
+from regional_forecast.evaluation.spatial_refinement import H3NeighborProbabilityRefiner
 from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
+    AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
+    HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleTransformerH3RegionalForecaster,
+    TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
 )
 from regional_forecast.reachability import ReachabilityFilter
 from regional_forecast.registry import resolve_registered_model
@@ -118,6 +123,60 @@ def _load_model_bundle(
             num_numeric_features=metadata["num_numeric_features"],
             num_mask_features=metadata["num_mask_features"],
             num_context_features=metadata["num_context_features"],
+            config=train_cfg.model,
+        )
+    elif model_type == "attention_hierarchical_gru":
+        model = AttentionHierarchicalH3RegionalForecaster(
+            input_num_region_classes=metadata["input_num_region_classes"],
+            input_parent_num_region_classes=metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(metadata),
+            max_children_per_horizon=metadata["max_children_per_horizon"],
+            num_status_classes=metadata["num_status_classes"],
+            num_numeric_features=metadata["num_numeric_features"],
+            num_mask_features=metadata["num_mask_features"],
+            num_context_features=metadata["num_context_features"],
+            config=train_cfg.model,
+        )
+    elif model_type == "horizon_decoder_gru":
+        model = HorizonDecoderHierarchicalH3RegionalForecaster(
+            input_num_region_classes=metadata["input_num_region_classes"],
+            input_parent_num_region_classes=metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(metadata),
+            max_children_per_horizon=metadata["max_children_per_horizon"],
+            num_status_classes=metadata["num_status_classes"],
+            num_numeric_features=metadata["num_numeric_features"],
+            num_mask_features=metadata["num_mask_features"],
+            num_context_features=metadata["num_context_features"],
+            config=train_cfg.model,
+        )
+    elif model_type == "transformer_horizon_decoder":
+        model = TransformerHorizonDecoderHierarchicalH3RegionalForecaster(
+            input_num_region_classes=metadata["input_num_region_classes"],
+            input_parent_num_region_classes=metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(metadata),
+            max_children_per_horizon=metadata["max_children_per_horizon"],
+            num_status_classes=metadata["num_status_classes"],
+            num_numeric_features=metadata["num_numeric_features"],
+            num_mask_features=metadata["num_mask_features"],
+            num_context_features=metadata["num_context_features"],
+            max_history_steps=int(metadata["history_steps"]),
+            config=train_cfg.model,
+        )
+    elif model_type == "multiscale_transformer_h3":
+        model = MultiscaleTransformerH3RegionalForecaster(
+            input_num_region_classes=metadata["input_num_region_classes"],
+            input_parent_num_region_classes=metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(metadata),
+            max_children_per_horizon=metadata["max_children_per_horizon"],
+            num_status_classes=metadata["num_status_classes"],
+            num_numeric_features=metadata["num_numeric_features"],
+            num_mask_features=metadata["num_mask_features"],
+            num_context_features=metadata["num_context_features"],
+            max_history_steps=int(metadata["history_steps"]),
             config=train_cfg.model,
         )
     else:
@@ -434,6 +493,7 @@ def _predict_single(
             batch["context"],
         )
         features: torch.Tensor = outputs["features"]  # type: ignore[assignment]
+        decoder_features: torch.Tensor | None = outputs.get("decoder_features")  # type: ignore[assignment]
         coarse_logits_list: List[torch.Tensor] = outputs["coarse_logits"]  # type: ignore[assignment]
         fine_probs_out: List[torch.Tensor] = []
         coarse_probs_out: List[torch.Tensor] = []
@@ -448,7 +508,12 @@ def _predict_single(
             coarse_probs_out.append(coarse_prob.cpu())
             current_top_k = min(top_parent_k_per_horizon[horizon_idx], int(coarse_prob.shape[-1]))
             _, top_parent_ids = torch.topk(coarse_prob, k=current_top_k, dim=-1)
-            child_probs_top = torch.softmax(model.child_logits(features, top_parent_ids, horizon_idx), dim=-1)
+            horizon_features = (
+                decoder_features[:, horizon_idx, :]
+                if decoder_features is not None
+                else features
+            )
+            child_probs_top = torch.softmax(model.child_logits(horizon_features, top_parent_ids, horizon_idx), dim=-1)
             fine_probs = _build_sparse_fine_probs(
                 coarse_probs=coarse_prob,
                 top_parent_ids=top_parent_ids,
@@ -618,6 +683,16 @@ def _build_prediction_output(
     target_regionizers = [H3Regionizer.from_metadata(item) for item in metadata["target_regionizers"]]
     coarse_regionizers = [H3Regionizer.from_metadata(item) for item in metadata["coarse_regionizers"]]
     reachability_filter = ReachabilityFilter(cfg, metadata)
+    spatial_refiner = H3NeighborProbabilityRefiner(
+        region_tokens_per_horizon=[
+            item["region_tokens"]
+            for item in metadata["target_regionizers"]
+        ],
+        enabled=bool(cfg.evaluation.h3_refinement_enabled),
+        alpha_per_horizon=cfg.h3_refinement_alpha_per_horizon,
+        ring_per_horizon=cfg.h3_refinement_ring_per_horizon,
+        preserve_unknown=bool(cfg.evaluation.h3_refinement_preserve_unknown),
+    )
     region_prob_arrays = [tensor.numpy()[0] for tensor in predictions["region_probs"]]
     status_prob_array = predictions["status_probs"].numpy()[0]
     coarse_prob_arrays = None
@@ -645,8 +720,9 @@ def _build_prediction_output(
             if model_raw_top1_region_id is not None
             else 0.0
         )
+        refined_model_probs = spatial_refiner.refine_horizon(model_probs[None, :], horizon_idx)[0]
         probs, reachability = reachability_filter.apply(
-            model_probs,
+            refined_model_probs,
             current_cell=batch_meta.get("current_cell"),
             horizon_idx=horizon_idx,
             horizon_minutes=int(horizon_minutes),

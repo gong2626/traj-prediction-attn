@@ -93,6 +93,15 @@ class ModelConfig:
     child_context_dim: int = 64
     enable_retrieval: bool = False
     retrieval_top_k: int = 8
+    temporal_attention_dim: int = 128
+    temporal_attention_dropout: float = 0.0
+    horizon_embedding_dim: int = 32
+    transformer_num_layers: int = 2
+    transformer_num_heads: int = 4
+    transformer_ffn_dim: int = 512
+    transformer_dropout: float = 0.1
+    multiscale_stride: int = 2
+    multiscale_num_layers: int = 1
 
 
 @dataclass
@@ -114,6 +123,8 @@ class TrainingConfig:
     lr_scheduler_threshold_mode: str = "rel"
     early_stopping_patience: int = 10
     early_stopping_min_delta: float = 0.0
+    horizon_consistency_weight: float = 0.0
+    horizon_consistency_gap_scaled: bool = True
     auto_resume: bool = False
     resume_from_checkpoint: Optional[str] = None
     save_last_checkpoint: bool = True
@@ -132,6 +143,11 @@ class EvaluationConfig:
     reachable_filter_enabled: bool = True
     reachable_max_speed_kts: float = 750.0
     reachable_margin_km: float = 250.0
+    h3_refinement_enabled: bool = False
+    h3_refinement_alpha: float | List[float] = 0.0
+    h3_refinement_ring: int | List[int] = 1
+    h3_refinement_preserve_unknown: bool = True
+    checkpoint_run_name: Optional[str] = None
 
 
 @dataclass
@@ -232,6 +248,14 @@ class ProjectConfig:
     @property
     def hierarchical_parent_top_k_per_horizon(self) -> List[int]:
         return self._resolve_eval_sequence(self.evaluation.hierarchical_parent_top_k, int)
+
+    @property
+    def h3_refinement_alpha_per_horizon(self) -> List[float]:
+        return self._resolve_eval_sequence(self.evaluation.h3_refinement_alpha, float)
+
+    @property
+    def h3_refinement_ring_per_horizon(self) -> List[int]:
+        return self._resolve_eval_sequence(self.evaluation.h3_refinement_ring, int)
 
     @property
     def dataset_scope(self) -> str:

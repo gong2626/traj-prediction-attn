@@ -1,0 +1,55 @@
+dataset:
+  scope: "global"
+  sample_interval_minutes: 5
+  history_minutes: 30
+  horizons_minutes: [10, 30, 60, 120]
+
+model:
+  model_type: "multiscale_transformer_h3"
+  embedding_dim: 128
+  parent_embedding_dim: 64
+  numeric_projection_dim: 64
+  mask_projection_dim: 16
+  context_projection_dim: 32
+  hidden_dim: 256
+  num_layers: 3
+  dropout: 0.15
+  child_context_dim: 64
+  temporal_attention_dim: 128
+  temporal_attention_dropout: 0.0
+  horizon_embedding_dim: 32
+  transformer_num_layers: 2
+  transformer_num_heads: 4
+  transformer_ffn_dim: 512
+  transformer_dropout: 0.05
+  multiscale_stride: 2
+  multiscale_num_layers: 1
+
+training:
+  batch_size: 1024
+  num_workers: 8
+  device: "cuda"
+  amp: true
+  pin_memory: true
+  persistent_workers: true
+
+evaluation:
+  top_ks: [1, 3, 5]
+  calibration_bins: 10
+  neighbor_hit_rings: [1, 1, 1, 1]
+  candidate_probability_mass: [0.8, 0.8, 0.8, 0.8]
+  candidate_top_cells: [24, 18, 18, 24]
+  prediction_examples: 24
+  hierarchical_parent_top_k: [64, 48, 48, 12]
+  reachable_filter_enabled: false
+  reachable_max_speed_kts: 750.0
+  reachable_margin_km: 250.0
+  h3_refinement_enabled: false
+  h3_refinement_alpha: [0.0, 0.0, 0.0, 0.0]
+  h3_refinement_ring: [1, 1, 1, 1]
+  h3_refinement_preserve_unknown: true
+  checkpoint_run_name: "global_multiscale_transformer_h3_tuned"
+
+output:
+  root_dir: "artifacts"
+  run_name: "global_multiscale_transformer_h3_tuned_no_reachability"

@@ -17,10 +17,15 @@ from regional_forecast.evaluation.metrics import (
     StreamingMultihorizonMetricAccumulator,
     compute_multihorizon_metrics,
 )
+from regional_forecast.evaluation.spatial_refinement import H3NeighborProbabilityRefiner
 from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
+    AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
+    HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleTransformerH3RegionalForecaster,
+    TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
 )
 from regional_forecast.reachability import ReachabilityFilter
 from regional_forecast.registry import register_evaluation_run
@@ -42,7 +47,8 @@ def _child_count_by_coarse_per_horizon(metadata: Dict[str, object]) -> List[List
 
 
 def _load_model(cfg: ProjectConfig, dataset: RegionalForecastDataset):
-    checkpoint_path = cfg.checkpoint_dir / f"{cfg.output.run_name}.pt"
+    checkpoint_run_name = cfg.evaluation.checkpoint_run_name or cfg.output.run_name
+    checkpoint_path = cfg.checkpoint_dir / f"{checkpoint_run_name}.pt"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
@@ -73,6 +79,60 @@ def _load_model(cfg: ProjectConfig, dataset: RegionalForecastDataset):
             num_numeric_features=dataset.metadata["num_numeric_features"],
             num_mask_features=dataset.metadata["num_mask_features"],
             num_context_features=dataset.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    elif model_type == "attention_hierarchical_gru":
+        model = AttentionHierarchicalH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    elif model_type == "horizon_decoder_gru":
+        model = HorizonDecoderHierarchicalH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    elif model_type == "transformer_horizon_decoder":
+        model = TransformerHorizonDecoderHierarchicalH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            max_history_steps=int(dataset.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    elif model_type == "multiscale_transformer_h3":
+        model = MultiscaleTransformerH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            max_history_steps=int(dataset.metadata["history_steps"]),
             config=cfg.model,
         )
     else:
@@ -235,13 +295,16 @@ def _build_child_lookup_tensors(
     hierarchy_per_horizon: Sequence[Dict[str, object]],
     *,
     device: torch.device,
+    unknown_fine_ids: Sequence[int],
 ) -> List[tuple[torch.Tensor, torch.Tensor]]:
     lookups: List[tuple[torch.Tensor, torch.Tensor]] = []
-    for hierarchy in hierarchy_per_horizon:
+    for horizon_idx, hierarchy in enumerate(hierarchy_per_horizon):
         coarse_to_children: Sequence[Sequence[int]] = hierarchy["coarse_to_children"]  # type: ignore[assignment]
         max_children = max(1, int(hierarchy.get("max_children", 1)))
-        child_indices = torch.zeros((len(coarse_to_children), max_children), dtype=torch.long, device=device)
-        valid_mask = torch.zeros((len(coarse_to_children), max_children), dtype=torch.bool, device=device)
+        unknown_fine_id = int(unknown_fine_ids[horizon_idx])
+        row_count = len(coarse_to_children) + 1
+        child_indices = torch.full((row_count, max_children), unknown_fine_id, dtype=torch.long, device=device)
+        valid_mask = torch.zeros((row_count, max_children), dtype=torch.bool, device=device)
         for coarse_id, children in enumerate(coarse_to_children):
             limit = min(len(children), max_children)
             if limit <= 0:
@@ -273,7 +336,11 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
     fine_class_counts = dataset.metadata["num_region_classes_per_horizon"]
     unknown_fine_ids = dataset.metadata["unknown_region_ids_per_horizon"]
     hierarchy_per_horizon = dataset.metadata["hierarchy_per_horizon"]
-    child_lookup_tables = _build_child_lookup_tensors(hierarchy_per_horizon, device=device)
+    child_lookup_tables = _build_child_lookup_tensors(
+        hierarchy_per_horizon,
+        device=device,
+        unknown_fine_ids=unknown_fine_ids,
+    )
 
     with torch.no_grad():
         for raw_batch in loader:
@@ -286,6 +353,7 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
                 batch["context"],
             )
             features: torch.Tensor = outputs["features"]  # type: ignore[assignment]
+            decoder_features: torch.Tensor | None = outputs.get("decoder_features")  # type: ignore[assignment]
             coarse_logits_list: List[torch.Tensor] = outputs["coarse_logits"]  # type: ignore[assignment]
             status_outputs.append(torch.softmax(outputs["status_logits"], dim=-1).cpu())
 
@@ -295,8 +363,13 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
 
                 current_top_k = min(top_parent_k_per_horizon[horizon_idx], int(coarse_prob.shape[-1]))
                 _, top_parent_ids = torch.topk(coarse_prob, k=current_top_k, dim=-1)
+                horizon_features = (
+                    decoder_features[:, horizon_idx, :]
+                    if decoder_features is not None
+                    else features
+                )
                 child_probs_top = torch.softmax(
-                    model.child_logits(features, top_parent_ids, horizon_idx),
+                    model.child_logits(horizon_features, top_parent_ids, horizon_idx),
                     dim=-1,
                 )
                 fine_probs = _build_sparse_fine_probs(
@@ -314,7 +387,7 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
                 true_coarse_ids = batch["coarse_region_labels"][:, horizon_idx]
                 true_child_ids = batch["child_region_labels"][:, horizon_idx]
                 true_child_probs = torch.softmax(
-                    model.child_logits(features, true_coarse_ids, horizon_idx),
+                    model.child_logits(horizon_features, true_coarse_ids, horizon_idx),
                     dim=-1,
                 )
                 batch_indices = torch.arange(true_coarse_ids.shape[0], device=device)
@@ -343,7 +416,7 @@ def _predict_probs(cfg: ProjectConfig, dataset: RegionalForecastDataset, model_t
         }
     if model_type == "gru":
         return _predict_probs_gru(cfg, dataset, model)
-    if model_type == "hierarchical_gru":
+    if model_type in {"hierarchical_gru", "attention_hierarchical_gru", "horizon_decoder_gru", "transformer_horizon_decoder", "multiscale_transformer_h3"}:
         return _predict_probs_hierarchical(cfg, dataset, model)
     raise ValueError(f"Unsupported model_type: {model_type}")
 
@@ -383,6 +456,7 @@ def _predict_batch_outputs(
             batch["context"],
         )
         features: torch.Tensor = outputs["features"]  # type: ignore[assignment]
+        decoder_features: torch.Tensor | None = outputs.get("decoder_features")  # type: ignore[assignment]
         coarse_logits_list: List[torch.Tensor] = outputs["coarse_logits"]  # type: ignore[assignment]
         status_probs = torch.softmax(outputs["status_logits"], dim=-1).cpu().numpy()
 
@@ -403,8 +477,13 @@ def _predict_batch_outputs(
 
             current_top_k = min(top_parent_k_per_horizon[horizon_idx], int(coarse_prob.shape[-1]))
             _, top_parent_ids = torch.topk(coarse_prob, k=current_top_k, dim=-1)
+            horizon_features = (
+                decoder_features[:, horizon_idx, :]
+                if decoder_features is not None
+                else features
+            )
             child_probs_top = torch.softmax(
-                model.child_logits(features, top_parent_ids, horizon_idx),
+                model.child_logits(horizon_features, top_parent_ids, horizon_idx),
                 dim=-1,
             )
             fine_probs = _build_sparse_fine_probs(
@@ -613,6 +692,16 @@ def run_evaluation(cfg: ProjectConfig) -> None:
         model.eval()
 
     reachability_filter = ReachabilityFilter(cfg, dataset.metadata)
+    spatial_refiner = H3NeighborProbabilityRefiner(
+        region_tokens_per_horizon=[
+            metadata["region_tokens"]
+            for metadata in dataset.metadata["target_regionizers"]
+        ],
+        enabled=bool(cfg.evaluation.h3_refinement_enabled),
+        alpha_per_horizon=cfg.h3_refinement_alpha_per_horizon,
+        ring_per_horizon=cfg.h3_refinement_ring_per_horizon,
+        preserve_unknown=bool(cfg.evaluation.h3_refinement_preserve_unknown),
+    )
     metric_accumulator = StreamingMultihorizonMetricAccumulator(
         top_ks=cfg.evaluation.top_ks,
         calibration_bins=cfg.evaluation.calibration_bins,
@@ -623,12 +712,17 @@ def run_evaluation(cfg: ProjectConfig) -> None:
         candidate_top_cells=cfg.candidate_top_cells_per_horizon,
     )
 
-    hierarchy_per_horizon = dataset.metadata.get("hierarchy_per_horizon") if model_type == "hierarchical_gru" else None
-    fine_class_counts = dataset.metadata.get("num_region_classes_per_horizon") if model_type == "hierarchical_gru" else None
-    unknown_fine_ids = dataset.metadata.get("unknown_region_ids_per_horizon") if model_type == "hierarchical_gru" else None
+    hierarchical_model = model_type in {"hierarchical_gru", "attention_hierarchical_gru", "horizon_decoder_gru", "transformer_horizon_decoder", "multiscale_transformer_h3"}
+    hierarchy_per_horizon = dataset.metadata.get("hierarchy_per_horizon") if hierarchical_model else None
+    fine_class_counts = dataset.metadata.get("num_region_classes_per_horizon") if hierarchical_model else None
+    unknown_fine_ids = dataset.metadata.get("unknown_region_ids_per_horizon") if hierarchical_model else None
     child_lookup_tables = (
-        _build_child_lookup_tensors(hierarchy_per_horizon, device=device)
-        if hierarchy_per_horizon is not None and model_type == "hierarchical_gru"
+        _build_child_lookup_tensors(
+            hierarchy_per_horizon,
+            device=device,
+            unknown_fine_ids=unknown_fine_ids,
+        )
+        if hierarchy_per_horizon is not None and hierarchical_model
         else None
     )
 
@@ -647,8 +741,9 @@ def run_evaluation(cfg: ProjectConfig) -> None:
             unknown_fine_ids,
             child_lookup_tables,
         )
+        refined_region_prob_arrays = spatial_refiner.refine_probability_arrays(raw_region_prob_arrays)
         filtered_region_prob_arrays, reachability_diagnostics = reachability_filter.filter_probability_arrays(
-            raw_region_prob_arrays,
+            refined_region_prob_arrays,
             current_region_ids=batch_cpu["region_seq"][:, -1].numpy(),
             horizons_minutes=dataset.metadata["horizons_minutes"],
             return_diagnostics=False,
@@ -669,8 +764,9 @@ def run_evaluation(cfg: ProjectConfig) -> None:
             trajectory_ids = dataset.get_value_batch("trajectory_ids", batch_indices)
             timestamps = dataset.get_value_batch("timestamps", batch_indices)
             example_raw_probs = [array[:remaining].copy() for array in raw_region_prob_arrays]
+            example_refined_probs = spatial_refiner.refine_probability_arrays(example_raw_probs)
             example_filtered_probs, reachability_diagnostics = reachability_filter.filter_probability_arrays(
-                example_raw_probs,
+                example_refined_probs,
                 current_region_ids=batch_cpu["region_seq"][:remaining, -1].numpy(),
                 horizons_minutes=dataset.metadata["horizons_minutes"],
                 return_diagnostics=True,

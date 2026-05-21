@@ -19,8 +19,12 @@ from regional_forecast.data.dataset import RegionalForecastDataset
 from regional_forecast.evaluation.metrics import compute_multihorizon_metrics
 from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
+    AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
+    HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleTransformerH3RegionalForecaster,
+    TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
 )
 from regional_forecast.registry import register_training_run
 
@@ -254,7 +258,7 @@ def _masked_multitask_loss(
 
 
 def _masked_hierarchical_loss(
-    model: HierarchicalH3RegionalForecaster,
+    model,
     outputs: Dict[str, object],
     coarse_region_labels: torch.Tensor,
     child_region_labels: torch.Tensor,
@@ -262,9 +266,13 @@ def _masked_hierarchical_loss(
     label_mask: torch.Tensor,
     region_criterion: nn.Module,
     status_criterion: nn.Module,
+    horizons_minutes: List[int],
+    horizon_consistency_weight: float = 0.0,
+    horizon_consistency_gap_scaled: bool = True,
 ) -> torch.Tensor:
     losses = []
     features: torch.Tensor = outputs["features"]  # type: ignore[assignment]
+    decoder_features: torch.Tensor | None = outputs.get("decoder_features")  # type: ignore[assignment]
     coarse_logits_list: List[torch.Tensor] = outputs["coarse_logits"]  # type: ignore[assignment]
     status_logits: torch.Tensor = outputs["status_logits"]  # type: ignore[assignment]
 
@@ -278,7 +286,12 @@ def _masked_hierarchical_loss(
         status_target = status_labels[:, horizon_idx][valid]
 
         coarse_logits = coarse_logits_full[valid]
-        child_logits = model.child_logits(features[valid], coarse_target, horizon_idx)
+        horizon_features = (
+            decoder_features[:, horizon_idx, :][valid]
+            if decoder_features is not None
+            else features[valid]
+        )
+        child_logits = model.child_logits(horizon_features, coarse_target, horizon_idx)
         status_logits_h = status_logits[:, horizon_idx, :][valid]
         valid_child = model.child_target_is_valid(coarse_target, child_target, horizon_idx)
 
@@ -289,7 +302,44 @@ def _masked_hierarchical_loss(
 
     if not losses:
         return features.sum() * 0.0
-    return torch.stack(losses).mean()
+    total_loss = torch.stack(losses).mean()
+    total_loss = total_loss + _horizon_consistency_loss(
+        decoder_features=decoder_features,
+        label_mask=label_mask,
+        horizons_minutes=horizons_minutes,
+        weight=horizon_consistency_weight,
+        gap_scaled=horizon_consistency_gap_scaled,
+    )
+    return total_loss
+
+
+def _horizon_consistency_loss(
+    decoder_features: Optional[torch.Tensor],
+    label_mask: torch.Tensor,
+    horizons_minutes: List[int],
+    weight: float,
+    gap_scaled: bool = True,
+) -> torch.Tensor:
+    if decoder_features is None:
+        return label_mask.new_zeros((), dtype=torch.float32)
+    if weight <= 0.0 or decoder_features.shape[1] < 2:
+        return decoder_features.new_zeros(())
+
+    valid_pairs = label_mask[:, :-1].bool() & label_mask[:, 1:].bool()
+    if not torch.any(valid_pairs):
+        return decoder_features.new_zeros(())
+
+    pair_losses = (decoder_features[:, 1:, :] - decoder_features[:, :-1, :]).pow(2).mean(dim=-1)
+    if gap_scaled:
+        gaps = [
+            max(1.0, float(horizons_minutes[idx + 1] - horizons_minutes[idx]))
+            for idx in range(len(horizons_minutes) - 1)
+        ]
+        gap_tensor = decoder_features.new_tensor(gaps)
+        pair_weights = gap_tensor.min() / gap_tensor
+        pair_losses = pair_losses * pair_weights.unsqueeze(0)
+
+    return pair_losses[valid_pairs].mean() * float(weight)
 
 
 def _build_model(cfg: ProjectConfig, train_ds: RegionalForecastDataset):
@@ -323,10 +373,65 @@ def _build_model(cfg: ProjectConfig, train_ds: RegionalForecastDataset):
             num_context_features=train_ds.metadata["num_context_features"],
             config=cfg.model,
         )
+    if model_type == "attention_hierarchical_gru":
+        return model_type, AttentionHierarchicalH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    if model_type == "horizon_decoder_gru":
+        return model_type, HorizonDecoderHierarchicalH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    if model_type == "transformer_horizon_decoder":
+        return model_type, TransformerHorizonDecoderHierarchicalH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    if model_type == "multiscale_transformer_h3":
+        return model_type, MultiscaleTransformerH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
     raise ValueError(f"Unsupported model_type: {cfg.model.model_type}")
 
 
 def _compute_loss_for_batch(
+    cfg: ProjectConfig,
     model_type: str,
     model,
     batch: Dict[str, torch.Tensor],
@@ -365,6 +470,9 @@ def _compute_loss_for_batch(
         label_mask=batch["label_mask"],
         region_criterion=region_criterion,
         status_criterion=status_criterion,
+        horizons_minutes=cfg.dataset.horizons_minutes,
+        horizon_consistency_weight=cfg.training.horizon_consistency_weight,
+        horizon_consistency_gap_scaled=cfg.training.horizon_consistency_gap_scaled,
     )
     return outputs, loss
 
@@ -526,6 +634,7 @@ def run_training(
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 _, loss = _compute_loss_for_batch(
+                    cfg=cfg,
                     model_type=model_type,
                     model=model,
                     batch=batch,
@@ -555,6 +664,7 @@ def run_training(
                 batch = _move_batch(raw_batch, device)
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     _, loss = _compute_loss_for_batch(
+                        cfg=cfg,
                         model_type=model_type,
                         model=model,
                         batch=batch,

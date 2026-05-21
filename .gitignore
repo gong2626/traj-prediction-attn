@@ -1,6 +1,9 @@
 artifacts/
 data/
 regional_forecast/data/
+logs/
+.research_refs/
+nohup.out
 
 __pycache__/
 *.py[cod]

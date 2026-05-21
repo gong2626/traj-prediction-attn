@@ -91,6 +91,12 @@ def _grid_disk(cell: str, ring: int) -> frozenset[str]:
     return frozenset(str(item) for item in h3.grid_disk(cell, ring))
 
 
+@lru_cache(maxsize=200_000)
+def _cell_area_km2(cell: str) -> float:
+    _require_h3()
+    return float(h3.cell_area(str(cell), unit="km^2"))
+
+
 def _neighbor_topk_hit_rate(
     sorted_idx: np.ndarray,
     targets: np.ndarray,
@@ -178,7 +184,35 @@ def _top_candidate_regions(
     return components
 
 
-def _candidate_region_cover_rates(
+def _top_valid_region_ids(
+    probabilities: np.ndarray,
+    max_cells: int,
+    region_tokens: Sequence[str],
+    cumulative_mass: float | None = None,
+) -> List[int]:
+    selected: List[int] = []
+    running_mass = 0.0
+    for region_id in np.argsort(-probabilities).tolist():
+        region_id = int(region_id)
+        if region_id < 0 or region_id >= len(region_tokens):
+            continue
+        probability = float(probabilities[region_id])
+        if probability <= 0.0:
+            break
+        selected.append(region_id)
+        running_mass += probability
+        if len(selected) >= int(max_cells):
+            break
+        if cumulative_mass is not None and running_mass >= float(cumulative_mass):
+            break
+    return selected
+
+
+def _area_for_region_ids(region_ids: Sequence[int], region_tokens: Sequence[str]) -> float:
+    return float(sum(_cell_area_km2(str(region_tokens[int(region_id)])) for region_id in region_ids))
+
+
+def _candidate_region_set_metrics(
     region_probs: np.ndarray,
     region_targets: np.ndarray,
     region_tokens: Sequence[str],
@@ -187,22 +221,42 @@ def _candidate_region_cover_rates(
     max_cells: int,
 ) -> Dict[str, float]:
     requested_ks = sorted({int(k) for k in top_ks})
+    cell_budgets = sorted({*requested_ks, int(max_cells)})
     if region_targets.shape[0] == 0:
         result = {f"candidate_top{k}_cover": 0.0 for k in requested_ks}
-        result["candidate_union_cover"] = 0.0
+        for budget in cell_budgets:
+            result[f"candidate_cover_at{budget}_cells"] = 0.0
+            result[f"candidate_area_at{budget}_cells_km2_mean"] = 0.0
+        result.update(
+            {
+                "candidate_union_cover": 0.0,
+                "candidate_union_cell_count_mean": 0.0,
+                "candidate_union_area_km2_mean": 0.0,
+                "candidate_union_probability_mass_mean": 0.0,
+                "candidate_cover_at_budget_cells": 0.0,
+                "candidate_area_at_budget_cells_km2_mean": 0.0,
+                "candidate_budget_cells": float(max_cells),
+            }
+        )
         return result
 
     cover_counts = {k: 0 for k in requested_ks}
+    fixed_budget_hits = {budget: 0 for budget in cell_budgets}
+    fixed_budget_area_sums = {budget: 0.0 for budget in cell_budgets}
     union_hits = 0
+    union_cell_count_sum = 0.0
+    union_area_sum = 0.0
+    union_probability_mass_sum = 0.0
 
     for sample_idx in range(int(region_targets.shape[0])):
         target_region = int(region_targets[sample_idx])
         if target_region < 0 or target_region >= len(region_tokens):
             continue
 
+        probabilities = region_probs[sample_idx]
         target_cell = str(region_tokens[target_region])
         candidate_regions = _top_candidate_regions(
-            probabilities=region_probs[sample_idx],
+            probabilities=probabilities,
             cumulative_mass=cumulative_mass,
             max_cells=max_cells,
             region_tokens=region_tokens,
@@ -223,13 +277,64 @@ def _candidate_region_cover_rates(
                 if k > max_rank and target_cell in union_cells:
                     cover_counts[k] += 1
 
+        selected_for_union = _top_valid_region_ids(
+            probabilities=probabilities,
+            max_cells=max_cells,
+            region_tokens=region_tokens,
+            cumulative_mass=cumulative_mass,
+        )
+        union_cell_count_sum += float(len(selected_for_union))
+        union_area_sum += _area_for_region_ids(selected_for_union, region_tokens)
+        union_probability_mass_sum += float(sum(float(probabilities[int(region_id)]) for region_id in selected_for_union))
+
+        for budget in cell_budgets:
+            selected_for_budget = _top_valid_region_ids(
+                probabilities=probabilities,
+                max_cells=budget,
+                region_tokens=region_tokens,
+                cumulative_mass=None,
+            )
+            fixed_budget_hits[budget] += int(target_region in selected_for_budget)
+            fixed_budget_area_sums[budget] += _area_for_region_ids(selected_for_budget, region_tokens)
+
     sample_count = float(region_targets.shape[0])
     result = {
         f"candidate_top{k}_cover": float(cover_counts[k] / sample_count)
         for k in requested_ks
     }
-    result["candidate_union_cover"] = float(union_hits / sample_count)
+    for budget in cell_budgets:
+        result[f"candidate_cover_at{budget}_cells"] = float(fixed_budget_hits[budget] / sample_count)
+        result[f"candidate_area_at{budget}_cells_km2_mean"] = float(fixed_budget_area_sums[budget] / sample_count)
+    result.update(
+        {
+            "candidate_union_cover": float(union_hits / sample_count),
+            "candidate_union_cell_count_mean": float(union_cell_count_sum / sample_count),
+            "candidate_union_area_km2_mean": float(union_area_sum / sample_count),
+            "candidate_union_probability_mass_mean": float(union_probability_mass_sum / sample_count),
+            "candidate_cover_at_budget_cells": float(fixed_budget_hits[int(max_cells)] / sample_count),
+            "candidate_area_at_budget_cells_km2_mean": float(fixed_budget_area_sums[int(max_cells)] / sample_count),
+            "candidate_budget_cells": float(max_cells),
+        }
+    )
     return result
+
+
+def _candidate_region_cover_rates(
+    region_probs: np.ndarray,
+    region_targets: np.ndarray,
+    region_tokens: Sequence[str],
+    top_ks: Iterable[int],
+    cumulative_mass: float,
+    max_cells: int,
+) -> Dict[str, float]:
+    return _candidate_region_set_metrics(
+        region_probs=region_probs,
+        region_targets=region_targets,
+        region_tokens=region_tokens,
+        top_ks=top_ks,
+        cumulative_mass=cumulative_mass,
+        max_cells=max_cells,
+    )
 
 
 def compute_multihorizon_metrics(
@@ -364,6 +469,7 @@ class StreamingMultihorizonMetricAccumulator:
                     "topk_ring_counts": {int(k): 0.0 for k in self.top_ks},
                     "candidate_cover_counts": {int(k): 0.0 for k in self.top_ks},
                     "candidate_union_hits": 0.0,
+                    "candidate_metric_sums": {},
                     "region_bin_counts": np.zeros(self.calibration_bins, dtype=np.float64),
                     "region_bin_conf_sums": np.zeros(self.calibration_bins, dtype=np.float64),
                     "region_bin_correct_sums": np.zeros(self.calibration_bins, dtype=np.float64),
@@ -460,6 +566,15 @@ class StreamingMultihorizonMetricAccumulator:
             for k in self.top_ks:
                 state["candidate_cover_counts"][int(k)] += float(candidate_cover[f"candidate_top{k}_cover"] * count)  # type: ignore[index]
             state["candidate_union_hits"] = float(state["candidate_union_hits"]) + float(candidate_cover["candidate_union_cover"] * count)
+            candidate_metric_sums: Dict[str, float] = state["candidate_metric_sums"]  # type: ignore[assignment]
+            old_candidate_fields = {
+                "candidate_union_cover",
+                *[f"candidate_top{k}_cover" for k in self.top_ks],
+            }
+            for key, value in candidate_cover.items():
+                if key in old_candidate_fields:
+                    continue
+                candidate_metric_sums[key] = float(candidate_metric_sums.get(key, 0.0)) + float(value) * count
 
     def finalize(self) -> List[Dict[str, float]]:
         rows: List[Dict[str, float]] = []
@@ -502,6 +617,8 @@ class StreamingMultihorizonMetricAccumulator:
                 row[f"region_top{k}"] = float(state["topk_hit_counts"][int(k)]) / count  # type: ignore[index]
                 row[f"region_top{k}_ring"] = float(state["topk_ring_counts"][int(k)]) / count  # type: ignore[index]
                 row[f"candidate_top{k}_cover"] = float(state["candidate_cover_counts"][int(k)]) / count  # type: ignore[index]
+            for key, value in sorted(dict(state["candidate_metric_sums"]).items()):  # type: ignore[arg-type]
+                row[str(key)] = float(value) / count
 
             rows.append(row)
         return rows
