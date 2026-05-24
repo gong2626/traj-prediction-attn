@@ -1,0 +1,13 @@
+\section{Discussion}
+
+The main result of this study is not simply that a Transformer beats a GRU. The more important finding is that multi-horizon regional aircraft forecasting benefits from horizon-specific temporal retrieval and explicit multiscale temporal structure, while still requiring calibration-aware evaluation. A model can improve candidate recall by diffusing probability mass more broadly, but such gains may come at the cost of confidence reliability. This is exactly what the H3 refinement ablation reveals.
+
+The regional formulation is also important. On open operational data, especially at 60- to 120-minute horizons, pointwise long-range trajectory regression can create a false sense of precision. The proposed H3 formulation makes uncertainty explicit, supports hierarchical reasoning, and allows downstream users to control the trade-off between region count, covered area, and recall.
+
+At the same time, the current paper has clear limitations. First, although the overall framework is spatially general, the present experiments use Europe-wide commercial traffic from ADRR rather than a truly global dataset. The title and claims of the final paper should reflect this empirical scope precisely.
+
+Second, the current model does not yet incorporate dedicated missing-data uncertainty modeling. The preprocessing pipeline preserves gap indicators, but the forecasting model itself is not yet explicitly uncertainty-aware in the sense of GRU-D, continuous-time latent dynamics, or conformal regional prediction. This is an important next step rather than a hidden contribution.
+
+Third, external aviation baselines remain limited by task mismatch. Much of the existing literature addresses short-term coordinate forecasting, terminal-area interaction, or dense contextual inputs unavailable in ADRR-derived artifacts. We therefore use a representative hierarchy of baselines that are faithful to the current task: Markov, hierarchical GRU, Transformer horizon decoder, and the proposed multiscale model.
+
+These limitations do not undermine the current contribution. Instead, they define a clear next-stage research agenda: gap-aware uncertainty modeling, calibration-aware post-processing, and broader cross-dataset validation.

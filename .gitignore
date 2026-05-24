@@ -15,6 +15,21 @@ __pycache__/
 
 .autodl/
 .Trash-0/
+.codex/
+codex-resume-*.tar.gz
+
+docs/paper/.ipynb_checkpoints/
+docs/paper/*.aux
+docs/paper/*.bbl
+docs/paper/*.blg
+docs/paper/*.fdb_latexmk
+docs/paper/*.fls
+docs/paper/*.log
+docs/paper/*.out
+docs/paper/*.xdv
+docs/paper/figures/*.tiff
+
+docs/slides/.ipynb_checkpoints/
 
 .DS_Store
 Thumbs.db

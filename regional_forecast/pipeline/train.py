@@ -17,12 +17,18 @@ from torch.utils.data import DataLoader
 from regional_forecast.config import ProjectConfig, load_config
 from regional_forecast.data.dataset import RegionalForecastDataset
 from regional_forecast.evaluation.metrics import compute_multihorizon_metrics
+from regional_forecast.external_baselines import (
+    AttentionTCNGRUHierarchicalH3RegionalForecaster,
+    FlightBERTPPHierarchicalH3RegionalForecaster,
+    TrAISformerHierarchicalH3RegionalForecaster,
+)
 from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
     AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleLocalCausalTransformerH3RegionalForecaster,
     MultiscaleTransformerH3RegionalForecaster,
     TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
 )
@@ -415,6 +421,61 @@ def _build_model(cfg: ProjectConfig, train_ds: RegionalForecastDataset):
         )
     if model_type == "multiscale_transformer_h3":
         return model_type, MultiscaleTransformerH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    if model_type == "multiscale_transformer_h3_local_causal":
+        return model_type, MultiscaleLocalCausalTransformerH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    if model_type == "attention_tcn_gru_h3":
+        return model_type, AttentionTCNGRUHierarchicalH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    if model_type == "traisformer_h3":
+        return model_type, TrAISformerHierarchicalH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    if model_type == "flightbertpp_h3":
+        return model_type, FlightBERTPPHierarchicalH3RegionalForecaster(
             input_num_region_classes=train_ds.metadata["input_num_region_classes"],
             input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
             num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],

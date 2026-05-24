@@ -1,0 +1,23 @@
+\section{Related Work}
+
+\subsection{Aircraft trajectory prediction}
+
+Learning-based aircraft trajectory prediction has primarily focused on continuous trajectory estimation. Representative examples include attention-enhanced recurrent models for 4D trajectory prediction~\cite{jia2022attentionlstm}, TCN-GRU hybrids with attention~\cite{ma2024attentiontcngru}, robust autoregressive Transformers for noisy ADS-B observations~\cite{li2025noiserobust}, and hybrid deep learning frameworks for sparse satellite observations~\cite{shan2025sparse}. Closer to direct multi-horizon aviation forecasting, FlightBERT++ uses a non-autoregressive encoder-decoder architecture to predict multiple flight horizons jointly~\cite{guo_flightbertpp_2024}. These works show that temporal attention and richer sequence encoders are useful in aviation forecasting. At the same time, most of them evaluate pointwise trajectory prediction rather than long-horizon probabilistic regional forecasting.
+
+Our work differs in two ways. First, the output is a distribution over future H3 regions instead of a coordinate sequence. Second, we focus on multi-horizon forecasting over a large operational flight archive rather than on a narrowly defined local airspace scenario. This makes calibration and candidate-region efficiency central evaluation targets.
+
+\subsection{Multi-horizon forecasting and horizon-aware decoding}
+
+The broader forecasting literature has shown that multi-horizon prediction benefits from architectures that do not force all horizons to share one fixed summary vector. Temporal Fusion Transformers explicitly combine local sequential processing with attention for multi-horizon prediction~\cite{lim2021tft}. MQTransformer further argues for context-dependent horizon decoding via decoder-encoder attention rather than a single compressed representation~\cite{mqtransformer2020}. In discrete trajectory modeling, TrAISformer combines discrete position tokens with a Transformer backbone for generative AIS trajectory prediction~\cite{nguyen_traisformer_2021}. These ideas are especially relevant for our setting because short-, medium-, and long-horizon aircraft forecasts depend on different portions of trajectory history.
+
+Our model adopts this principle directly: each horizon is represented by a learned embedding and query, and each query attends over the encoded history. Rather than porting a generic time-series forecaster end-to-end, we integrate horizon-aware decoding into the existing hierarchical H3 aviation forecaster.
+
+\subsection{Calibration and candidate-region forecasting}
+
+For safety-relevant or operational forecasting tasks, accuracy alone is insufficient; predictive probabilities should also be calibrated. Guo et al.~showed that modern neural networks can be substantially miscalibrated even when they are accurate~\cite{guo2017calibration}. This issue is especially important for trajectory forecasting, where a candidate region set may look operationally useful while being probabilistically overconfident or spatially bloated.
+
+Our evaluation therefore reports not only top-k accuracy, but also negative log-likelihood (NLL), Brier score, and expected calibration error (ECE). In addition, we evaluate candidate-region quality using probability-mass candidate coverage, candidate cell count, and candidate area. This lets us distinguish sharper and better-calibrated models from models that achieve high recall only by spreading mass over larger regions.
+
+\subsection{Open aviation trajectory data and hierarchical spatial indexing}
+
+The OpenSky Network has established open flight surveillance as a realistic research substrate~\cite{opensky2014,strohmeier2021crowdsourced}. ADRR complements this landscape by providing structured access to detailed commercial flight trajectories and associated network information for research and development~\cite{eurocontrol_adrr_2025}. On the spatial side, H3 offers a hierarchical hexagonal indexing system that supports coarse-to-fine reasoning and neighbor traversal at global scale~\cite{h3docs2025}. These properties make H3 attractive for probabilistic regional forecasting, where the model should reason over large spatial support while retaining structured locality.

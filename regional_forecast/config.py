@@ -102,6 +102,15 @@ class ModelConfig:
     transformer_dropout: float = 0.1
     multiscale_stride: int = 2
     multiscale_num_layers: int = 1
+    short_term_branch_steps: int = 4
+    short_term_branch_horizons: int = 2
+    short_term_branch_num_layers: int = 1
+    short_term_branch_dropout: float = 0.05
+    external_tcn_num_layers: int = 3
+    external_tcn_kernel_size: int = 3
+    external_tcn_dropout: float = 0.1
+    external_decoder_num_layers: int = 2
+    external_decoder_num_heads: int = 4
 
 
 @dataclass
@@ -140,6 +149,8 @@ class EvaluationConfig:
     candidate_top_cells: int | List[int] = 12
     prediction_examples: int = 20
     hierarchical_parent_top_k: int | List[int] = 8
+    hierarchical_coarse_temperature: float | List[float] = 1.0
+    hierarchical_child_temperature: float | List[float] = 1.0
     reachable_filter_enabled: bool = True
     reachable_max_speed_kts: float = 750.0
     reachable_margin_km: float = 250.0
@@ -248,6 +259,14 @@ class ProjectConfig:
     @property
     def hierarchical_parent_top_k_per_horizon(self) -> List[int]:
         return self._resolve_eval_sequence(self.evaluation.hierarchical_parent_top_k, int)
+
+    @property
+    def hierarchical_coarse_temperature_per_horizon(self) -> List[float]:
+        return self._resolve_eval_sequence(self.evaluation.hierarchical_coarse_temperature, float)
+
+    @property
+    def hierarchical_child_temperature_per_horizon(self) -> List[float]:
+        return self._resolve_eval_sequence(self.evaluation.hierarchical_child_temperature, float)
 
     @property
     def h3_refinement_alpha_per_horizon(self) -> List[float]:

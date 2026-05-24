@@ -1,0 +1,49 @@
+\section{问题定义}
+
+设历史窗口为
+\begin{equation}
+X = \{z_1, z_2, \dots, z_T\}, \qquad T = 6,
+\end{equation}
+其中 $T=6$ 对应 30 分钟历史在 5 分钟采样间隔下的 6 个重采样时刻。每个时间步
+$z_t = (r_t, p_t, u_t, m_t)$
+包含四类输入：输入分辨率 H3 区域 id $r_t$、其父层 H3 区域 id $p_t$、数值特征向量 $u_t \in \mathbb{R}^{18}$，以及 mask 向量 $m_t \in \{0,1\}^2$。本文沿用项目既有特征构造流程：数值特征覆盖位置正余弦编码、位移与距离增量、航迹方向、区域切换、飞行高度、速度、航向、垂直速度、时间间隔和地面状态；mask 特征为 \texttt{observed\_flag} 与 \texttt{gap\_flag}。此外，每个样本还包含一个上下文向量 $c \in \mathbb{R}^{9}$，其中编码了时刻周期、当前位置以及项目既有的目标标识哈希特征。
+
+预测时域集合记为
+\begin{equation}
+\mathcal{H} = \{10, 30, 60, 120\}\ \text{minutes}.
+\end{equation}
+对每个时域 $h_j \in \mathcal{H}$，模型需要同时输出：（1）粗粒度 H3 区域标签 $y_j^{(c)}$；（2）在粗区域条件下的细粒度子区域标签 $y_j^{(f)}$；（3）状态标签 $s_j \in \{\text{airborne}, \text{landed}\}$。在本文的完整实验中，细粒度目标分辨率为 $[3,3,2,2]$，对应粗粒度分辨率为 $[2,2,1,1]$。因此，短时预测保持更细的空间粒度，而 60 和 120 分钟时域使用更粗的空间支撑以匹配增长的不确定性。
+
+细粒度区域预测被写成层级条件分解：
+\begin{equation}
+p(y_j^{(c)}, y_j^{(f)}, s_j \mid X, c, h_j)
+=
+p(s_j \mid X, c, h_j)\,
+p(y_j^{(c)} \mid X, c, h_j)\,
+p(y_j^{(f)} \mid y_j^{(c)}, X, c, h_j).
+\end{equation}
+这种分解与 H3 的父子层级一致，也使模型能够在较大输出空间上保持可训练的类别规模。对于某些样本，较长时域的未来标签可能因 mission 截断而不可用。项目实现中为每个时域维护有效性掩码 $v_j \in \{0,1\}$，仅在 $v_j=1$ 时累计损失和评价指标。
+
+训练目标由粗区域分类、细区域分类和状态分类三部分构成。记 $\mathcal{V}$ 为有效 horizon 集合，则单样本损失写为
+\begin{equation}
+\mathcal{L}
+=
+\frac{1}{|\mathcal{V}|}
+\sum_{j \in \mathcal{V}}
+\Big[
+\ell_{\text{coarse}}^{(j)}
++
+\ell_{\text{child}}^{(j)}
++
+\ell_{\text{status}}^{(j)}
+\Big]
+\;+\;
+\lambda_{\text{cons}}\mathcal{L}_{\text{cons}},
+\end{equation}
+其中三项基本损失均为交叉熵；$\ell_{\text{child}}^{(j)}$ 仅在对应父区域下的子类标签有效时计算；$\mathcal{L}_{\text{cons}}$ 是可选的相邻 horizon 解码特征一致性正则。最终报告模型中 $\lambda_{\text{cons}}=0$，即不启用该正则项。
+
+给定每个时域上的细粒度区域概率 $\pi_j$ 后，本文同时评价分类性能、概率质量和候选区域效率。区域分类指标包括 top-1/top-3/top-5 命中率；概率质量指标包括负对数似然（NLL）、Brier 分数和期望校准误差（ECE）。为评价候选区域，本文在每个 horizon 上按概率从高到低选择细粒度 cell，直到累计概率质量达到阈值 $\tau_j=0.8$ 或达到最大 cell 预算 $B_j$，其中
+\begin{equation}
+B = [24, 18, 18, 24].
+\end{equation}
+随后将被选中的 1-ring 邻接 cell 合并为连通候选组件，并按组件概率质量排序。基于这一构造，本文报告：（1）候选组件并集是否覆盖真实目标 cell 的 \emph{candidate union cover}；（2）候选并集的平均 cell 数量与平均面积；（3）在固定 cell 预算下的覆盖率和面积。这样的定义使“更高召回”与“更大空间扩张”能够被明确区分，也使不同模型的概率分布是否既准确又紧凑成为可检验问题。

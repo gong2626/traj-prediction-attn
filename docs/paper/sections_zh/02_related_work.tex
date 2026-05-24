@@ -1,0 +1,23 @@
+\section{相关工作}
+
+\subsection{航空轨迹点预测与多时域航空预测}
+
+航空轨迹预测的主流文献长期围绕连续点位或四维轨迹回归展开。Attention-LSTM 模型将注意力机制引入四维轨迹预测，以改善对历史关键状态的利用~\cite{jia2022attentionlstm}；Attention-TCN-GRU 模型则结合时序卷积、循环单元和注意力模块进行数据驱动的四维轨迹预测~\cite{ma2024attentiontcngru}。这类方法说明，历史片段中的不同时间步对未来轨迹并非同等重要。除循环网络外，近期航空文献也开始引入更强的时频与 Transformer 结构。例如，WTFTP 利用时频小波表示建模轨迹中的全局与局部模式~\cite{zhang2023wtftp}，其后续工作 WTFTP+ 进一步将问题扩展到直接多时域预测~\cite{guo2026wtftpplus}；FlightBERT++ 则明确采用非自回归广义 encoder-decoder 框架，配合 horizon-aware context generator 与 differential-prompted decoder，直接输出多个预测提前量上的飞行状态~\cite{guo_flightbertpp_2024}。与此同时，也有研究开始面向更复杂的数据条件，处理噪声 ADS-B 观测或稀疏卫星观测场景~\cite{li2025noiserobust,shan2025sparse}。
+
+这些工作共同推动了航空轨迹预测从单步外推走向更复杂的序列建模，但它们绝大多数仍以连续坐标误差为主要目标。相比之下，本文关注的是开放运行档案上的长时域区域概率预测：输出空间从连续点轨迹转为层级 H3 区域分布，评价目标也从点误差扩展到概率质量和候选区域效率。
+
+\subsection{多时域预测与 horizon-aware 解码}
+
+从更一般的序列预测文献来看，多时域预测的核心难点并不只是“预测得更远”，而在于不同 horizon 往往依赖历史中的不同信息。Temporal Fusion Transformer 将局部时序处理、门控结构与注意力机制结合，用于可解释的多时域预测~\cite{lim2021tft}。MQTransformer 则更直接地指出，若所有预测时域都共享同一个压缩上下文，模型容易受到信息瓶颈影响；为此，该工作引入依赖上下文的 decoder-encoder attention，使不同 horizon 可以读取不同的历史表示~\cite{mqtransformer2020}。在离散轨迹建模方向，TrAISformer 将离散空间表示与 Transformer 结合，用于 AIS 航迹预测，说明基于离散空间支撑的序列建模可以成为坐标回归之外的另一条路线~\cite{nguyen_traisformer_2021}。
+
+本文的时间结构设计直接受到这类工作启发。我们并不让全部预测时域共享单个历史摘要向量，而是为每个 horizon 分配独立的可学习 query，让模型从历史编码状态中提取与该时域最相关的信息。与通用时间序列预测器不同的是，本文把这种 horizon-aware 解码嵌入到了层级 H3 航空区域预测框架中，并与 coarse-to-fine 输出头保持兼容。
+
+\subsection{概率预测、校准与候选区域评估}
+
+一旦输出从“单点轨迹”转向“区域概率分布”，评价问题就不再只是命中率问题。Gneiting 和 Raftery 系统讨论了严格适定评分规则，指出概率预测不仅需要高分辨率，还需要在校准约束下保持足够尖锐~\cite{gneiting2007strictlyproper}。Brier 分数作为概率预测中的经典二次评分规则，长期被用于衡量类别事件预测的整体质量~\cite{brier1950verification}。在深度学习背景下，Guo 等人进一步表明，即使现代神经网络在准确率上表现良好，也可能存在明显误校准~\cite{guo2017calibration}。
+
+这类结论对于航空区域预测尤其重要。一个模型可以通过把概率质量摊到更大的空间支持上来提高 top-k 或候选召回，但这并不意味着它给出的概率是可信的，也不意味着候选区域在运行上可用。因此，本文除了报告 top-k 区域命中率外，还同时报告 NLL、Brier 分数和 ECE，并显式衡量候选覆盖率、候选 cell 数量和候选面积。这样的评估方式有助于区分“真正学到了更好的概率分布”与“仅仅扩大了候选区域”这两类模型。
+
+\subsection{开放飞行数据、离散空间建模与层级网格}
+
+本文的问题设定还受到开放飞行数据基础设施和离散空间表示方法的共同影响。OpenSky 的原始传感网络与后续开放数据发布，使得面向真实运行流量的大规模研究成为可能~\cite{opensky2014,strohmeier2021crowdsourced}；ADRR 则提供了更适合研究与开发的结构化飞行档案~\cite{eurocontrol_adrr_2025}。在空间表示方面，离散全球网格系统为多分辨率区域推理提供了统一支撑~\cite{sahr2003gdggs}，而 H3 进一步给出了工程上成熟的层级六边形索引和邻域操作接口~\cite{h3docs2025}。本文正是在这一背景下，把多时域航空预测从连续坐标回归改写为层级 H3 概率区域预测，并将区域概率、层级解码和候选区域评估纳入同一实验协议中。

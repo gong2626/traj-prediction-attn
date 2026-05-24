@@ -18,12 +18,18 @@ from regional_forecast.evaluation.metrics import (
     compute_multihorizon_metrics,
 )
 from regional_forecast.evaluation.spatial_refinement import H3NeighborProbabilityRefiner
+from regional_forecast.external_baselines import (
+    AttentionTCNGRUHierarchicalH3RegionalForecaster,
+    FlightBERTPPHierarchicalH3RegionalForecaster,
+    TrAISformerHierarchicalH3RegionalForecaster,
+)
 from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
     AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleLocalCausalTransformerH3RegionalForecaster,
     MultiscaleTransformerH3RegionalForecaster,
     TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
 )
@@ -123,6 +129,61 @@ def _load_model(cfg: ProjectConfig, dataset: RegionalForecastDataset):
         )
     elif model_type == "multiscale_transformer_h3":
         model = MultiscaleTransformerH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            max_history_steps=int(dataset.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    elif model_type == "multiscale_transformer_h3_local_causal":
+        model = MultiscaleLocalCausalTransformerH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            max_history_steps=int(dataset.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    elif model_type == "attention_tcn_gru_h3":
+        model = AttentionTCNGRUHierarchicalH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            config=cfg.model,
+        )
+    elif model_type == "traisformer_h3":
+        model = TrAISformerHierarchicalH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            max_history_steps=int(dataset.metadata["history_steps"]),
+            config=cfg.model,
+        )
+    elif model_type == "flightbertpp_h3":
+        model = FlightBERTPPHierarchicalH3RegionalForecaster(
             input_num_region_classes=dataset.metadata["input_num_region_classes"],
             input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
             num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
@@ -315,6 +376,15 @@ def _build_child_lookup_tensors(
     return lookups
 
 
+def _temperature_scale_logits(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    temperature = float(temperature)
+    if temperature <= 0.0:
+        raise ValueError("Temperature must be positive.")
+    if abs(temperature - 1.0) < 1.0e-8:
+        return logits
+    return logits / temperature
+
+
 def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDataset, model) -> Dict[str, object]:
     device = _resolve_device(cfg)
     model = model.to(device)
@@ -333,6 +403,8 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
     status_outputs: List[torch.Tensor] = []
 
     top_parent_k_per_horizon = [max(1, int(value)) for value in cfg.hierarchical_parent_top_k_per_horizon]
+    coarse_temp_per_horizon = [max(1.0e-6, float(value)) for value in cfg.hierarchical_coarse_temperature_per_horizon]
+    child_temp_per_horizon = [max(1.0e-6, float(value)) for value in cfg.hierarchical_child_temperature_per_horizon]
     fine_class_counts = dataset.metadata["num_region_classes_per_horizon"]
     unknown_fine_ids = dataset.metadata["unknown_region_ids_per_horizon"]
     hierarchy_per_horizon = dataset.metadata["hierarchy_per_horizon"]
@@ -358,6 +430,7 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
             status_outputs.append(torch.softmax(outputs["status_logits"], dim=-1).cpu())
 
             for horizon_idx, coarse_logits in enumerate(coarse_logits_list):
+                coarse_logits = _temperature_scale_logits(coarse_logits, coarse_temp_per_horizon[horizon_idx])
                 coarse_prob = torch.softmax(coarse_logits, dim=-1)
                 coarse_outputs[horizon_idx].append(coarse_prob.cpu())
 
@@ -369,7 +442,10 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
                     else features
                 )
                 child_probs_top = torch.softmax(
-                    model.child_logits(horizon_features, top_parent_ids, horizon_idx),
+                    _temperature_scale_logits(
+                        model.child_logits(horizon_features, top_parent_ids, horizon_idx),
+                        child_temp_per_horizon[horizon_idx],
+                    ),
                     dim=-1,
                 )
                 fine_probs = _build_sparse_fine_probs(
@@ -387,7 +463,10 @@ def _predict_probs_hierarchical(cfg: ProjectConfig, dataset: RegionalForecastDat
                 true_coarse_ids = batch["coarse_region_labels"][:, horizon_idx]
                 true_child_ids = batch["child_region_labels"][:, horizon_idx]
                 true_child_probs = torch.softmax(
-                    model.child_logits(horizon_features, true_coarse_ids, horizon_idx),
+                    _temperature_scale_logits(
+                        model.child_logits(horizon_features, true_coarse_ids, horizon_idx),
+                        child_temp_per_horizon[horizon_idx],
+                    ),
                     dim=-1,
                 )
                 batch_indices = torch.arange(true_coarse_ids.shape[0], device=device)
@@ -416,7 +495,17 @@ def _predict_probs(cfg: ProjectConfig, dataset: RegionalForecastDataset, model_t
         }
     if model_type == "gru":
         return _predict_probs_gru(cfg, dataset, model)
-    if model_type in {"hierarchical_gru", "attention_hierarchical_gru", "horizon_decoder_gru", "transformer_horizon_decoder", "multiscale_transformer_h3"}:
+    if model_type in {
+        "hierarchical_gru",
+        "attention_hierarchical_gru",
+        "horizon_decoder_gru",
+        "transformer_horizon_decoder",
+        "multiscale_transformer_h3",
+        "multiscale_transformer_h3_local_causal",
+        "attention_tcn_gru_h3",
+        "traisformer_h3",
+        "flightbertpp_h3",
+    }:
         return _predict_probs_hierarchical(cfg, dataset, model)
     raise ValueError(f"Unsupported model_type: {model_type}")
 
@@ -469,9 +558,12 @@ def _predict_batch_outputs(
             raise ValueError("Hierarchical evaluation metadata is missing.")
 
         top_parent_k_per_horizon = [max(1, int(value)) for value in cfg.hierarchical_parent_top_k_per_horizon]
+        coarse_temp_per_horizon = [max(1.0e-6, float(value)) for value in cfg.hierarchical_coarse_temperature_per_horizon]
+        child_temp_per_horizon = [max(1.0e-6, float(value)) for value in cfg.hierarchical_child_temperature_per_horizon]
         fine_outputs: List[np.ndarray] = []
         coarse_outputs: List[np.ndarray] = []
         for horizon_idx, coarse_logits in enumerate(coarse_logits_list):
+            coarse_logits = _temperature_scale_logits(coarse_logits, coarse_temp_per_horizon[horizon_idx])
             coarse_prob = torch.softmax(coarse_logits, dim=-1)
             coarse_outputs.append(coarse_prob.cpu().numpy())
 
@@ -483,7 +575,10 @@ def _predict_batch_outputs(
                 else features
             )
             child_probs_top = torch.softmax(
-                model.child_logits(horizon_features, top_parent_ids, horizon_idx),
+                _temperature_scale_logits(
+                    model.child_logits(horizon_features, top_parent_ids, horizon_idx),
+                    child_temp_per_horizon[horizon_idx],
+                ),
                 dim=-1,
             )
             fine_probs = _build_sparse_fine_probs(
@@ -712,7 +807,17 @@ def run_evaluation(cfg: ProjectConfig) -> None:
         candidate_top_cells=cfg.candidate_top_cells_per_horizon,
     )
 
-    hierarchical_model = model_type in {"hierarchical_gru", "attention_hierarchical_gru", "horizon_decoder_gru", "transformer_horizon_decoder", "multiscale_transformer_h3"}
+    hierarchical_model = model_type in {
+        "hierarchical_gru",
+        "attention_hierarchical_gru",
+        "horizon_decoder_gru",
+        "transformer_horizon_decoder",
+        "multiscale_transformer_h3",
+        "multiscale_transformer_h3_local_causal",
+        "attention_tcn_gru_h3",
+        "traisformer_h3",
+        "flightbertpp_h3",
+    }
     hierarchy_per_horizon = dataset.metadata.get("hierarchy_per_horizon") if hierarchical_model else None
     fine_class_counts = dataset.metadata.get("num_region_classes_per_horizon") if hierarchical_model else None
     unknown_fine_ids = dataset.metadata.get("unknown_region_ids_per_horizon") if hierarchical_model else None

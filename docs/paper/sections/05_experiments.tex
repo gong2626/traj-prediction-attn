@@ -1,0 +1,23 @@
+\section{Experimental Setup}
+
+\subsection{Dataset}
+
+We evaluate on one month of ADRR-derived commercial flight trajectories from March 2024. According to EUROCONTROL's ADRR description, the repository contains detailed data for commercial flights operating in and over Europe~\cite{eurocontrol_adrr_2025}. After mission segmentation, resampling, feature construction, and validity filtering, the resulting dataset contains 14,505,637 training windows, 3,108,933 validation windows, and 3,098,032 test windows, for a total of 20,712,602 forecast windows. We split by aircraft rather than by window, which reduces leakage from repeated trajectories of the same aircraft across train, validation, and test sets.
+
+\subsection{Spatial and temporal setup}
+
+The input history covers 30 minutes at a 5-minute interval. Forecast horizons are 10, 30, 60, and 120 minutes. We use H3-based discretization with target resolutions $[3,3,2,2]$ and corresponding coarse resolutions $[2,2,1,1]$. This choice keeps shorter horizons spatially finer and longer horizons spatially broader, which reflects the increase in uncertainty with forecast lead time.
+
+\subsection{Baselines}
+
+We compare six representative models: (1) a classical Markov regional transition baseline trained from empirical transition counts, (2) the original hierarchical GRU baseline, (3) TrAISformer-H3 adapted from a discrete trajectory Transformer~\cite{nguyen_traisformer_2021}, (4) FlightBERT++-H3 adapted from a non-autoregressive multi-horizon flight predictor~\cite{guo_flightbertpp_2024}, (5) a single-scale Transformer horizon decoder without the multiscale branch, and (6) the proposed multiscale model.
+
+This baseline stack is deliberately aligned with the problem setting. For TrAISformer-H3 and FlightBERT++-H3, we retain the core temporal modeling structures and replace the original coordinate-regression or discrete-position outputs with the same hierarchical H3 output heads used by our model. This keeps input history, forecast horizons, data splits, and metrics identical across methods. Many other aviation predictors target short-term point prediction or terminal-area motion and are therefore not directly comparable to long-horizon H3-region forecasting on large-scale open traffic archives.
+
+\subsection{Metrics}
+
+We report region top-1/top-3/top-5 accuracy, region NLL, region Brier score, region ECE with 10 calibration bins, candidate union cover, candidate union cell count, candidate union area, cover at fixed cell budget, and status accuracy. In practice, status accuracy saturates at 1.0 in all full-scale runs and is therefore not a discriminative metric for model ranking. The main analysis focuses on regional and candidate-set behavior.
+
+\subsection{Implementation details}
+
+The final model uses a hidden dimension of 256, two Transformer layers in the fine-scale branch, one Transformer layer in the coarse branch, four attention heads, and horizon embeddings of dimension 32. Training uses mixed precision on GPU, batch size 1024, weight decay $10^{-4}$, early stopping, and a learning-rate scheduler. The final tuned run converges at epoch 182 with the best validation loss of 0.3055.

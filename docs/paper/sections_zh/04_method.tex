@@ -1,0 +1,140 @@
+\section{方法}
+
+\subsection{总体思路}
+
+本文方法建立在一个统一的层级 H3 预测框架上：所有神经模型都使用相同的输入张量格式、相同的粗到细输出头、相同的层级损失定义以及相同的评价协议。这样做有两个目的。第一，它把研究重点集中在\emph{时间建模结构}本身，而不是把性能变化混杂到输出空间或评价口径中。第二，它使内部模型演化和外部适配基线都能在同一 H3 区域预测任务下公平比较；不同模型在训练时只允许采用各自稳定收敛所需的超参数设置。
+
+整体流程如下。原始飞行记录先经 mission 切分和 5 分钟重采样，随后被编码为历史区域 token、父层区域 token、数值运动特征、mask 特征和上下文特征。时间编码模块将历史序列映射为针对不同 horizon 的解码特征；层级输出头再分别预测粗区域、状态以及条件细区域分布。推理阶段，粗区域分布和条件子区域分布被组合成细粒度 H3 概率，随后再进入 reachability filtering 和候选区域生成模块。
+
+\subsection{输入表示与时间有效掩码}
+
+对每个时间步 $z_t=(r_t,p_t,u_t,m_t)$，模型分别学习输入区域 embedding、父层区域 embedding，并将数值特征和 mask 特征线性投影到同一隐空间。设嵌入和投影后的时间步表示为
+\begin{equation}
+\tilde{z}_t = [E_r(r_t); E_p(p_t); W_u u_t; W_m m_t].
+\end{equation}
+其中 $E_r(\cdot)$ 和 $E_p(\cdot)$ 分别是输入 H3 区域与父层区域 embedding 表，$W_u$ 和 $W_m$ 为数值与 mask 投影矩阵。样本级上下文向量 $c$ 通过单独线性层投影后，与时间编码摘要拼接。
+
+项目实现没有简单地把全部填充值都视为有效观测，而是根据 \texttt{observed\_flag}、\texttt{gap\_flag} 和未知区域 token 共同构造时间有效掩码。只有在时间步不是“由缺口补齐且区域未知”的情况下，该时间步才被视为有效。这一掩码被所有 attention 或 pooling 模块共享，用于抑制填充片段对历史摘要的污染。
+
+\subsection{共享的层级 H3 输出头}
+
+所有层级模型共享同一输出协议。对每个预测时域 $h_j$，模型先输出粗粒度 logits
+\begin{equation}
+g_j^{(c)} \in \mathbb{R}^{C_j},
+\end{equation}
+其中 $C_j$ 是该时域对应粗分辨率下的区域类别数；同时输出状态 logits
+\begin{equation}
+g_j^{(s)} \in \mathbb{R}^{2}.
+\end{equation}
+随后，给定某个粗区域 id $y_j^{(c)}$，模型再通过一个条件子头输出该父区域下的子区域 logits
+\begin{equation}
+g_j^{(f)}(\,\cdot \mid y_j^{(c)}) \in \mathbb{R}^{M_j},
+\end{equation}
+其中 $M_j$ 为该时域下预设的最大子类长度。实现上，每个 coarse id 都关联一张合法子类掩码表；超出该父区域实际子类数的 logits 在训练和推理中都被屏蔽为极小值。
+
+训练阶段，子区域交叉熵使用\emph{真值粗区域标签}作为条件，从而稳定地学习父子层级对应关系。推理阶段，模型先从粗区域分布中选取 top-$K_j$ 个父区域，再对每个父区域计算条件子分布，并按
+\begin{equation}
+p(y_j^{(f)}=c \mid X)
+=
+\sum_{y_j^{(c)} \in \mathcal{P}_{K_j}}
+p(y_j^{(c)} \mid X)\,
+p(y_j^{(f)}=c \mid y_j^{(c)}, X)
+\end{equation}
+把父层概率质量散射回细粒度 H3 cell。未被显式分配的剩余概率质量被写入 unknown 类，以保证每个时域上的细粒度概率和为 1。本文完整实验中使用的父层 top-$K$ 为 $[64,48,48,12]$。
+
+\subsection{层级 GRU 基线}
+
+项目原始基线是层级 GRU 预测器。它把时间步表示序列 $\{\tilde{z}_t\}_{t=1}^T$ 输入多层 GRU 编码器，以最终隐状态 $h_T$ 作为历史摘要，再与上下文投影拼接得到共享特征
+\begin{equation}
+b = [h_T; W_c c].
+\end{equation}
+对每个 horizon，粗区域头和状态头都直接以这一共享特征为输入，子区域头则在共享特征基础上再拼接父区域 embedding。
+
+这一基线已经具备较强的空间结构先验，但它把所有预测时域都压缩到同一时间摘要 $b$ 上。换言之，10 分钟与 120 分钟预测只能共享同一段时间表征，无法显式访问历史中的不同时段信息。后续实验表明，这正是时间建模的主要瓶颈。
+
+\subsection{单尺度 Horizon-Query Transformer}
+
+为缓解单一时间摘要带来的信息瓶颈，我们首先把 GRU 时间编码器替换为 horizon-aware Transformer 编码器。具体地，拼接后的时间步表示先被投影到统一隐空间，并加入可学习位置 embedding：
+\begin{equation}
+H^{(0)} = W_z \tilde{Z} + P.
+\end{equation}
+随后，$H^{(0)}$ 进入带时间有效掩码的 Transformer encoder，得到历史编码序列
+\begin{equation}
+H = \mathrm{Enc}(H^{(0)}).
+\end{equation}
+与直接取最后一个时间步不同，编码器输出首先做 masked mean pooling，与上下文投影拼接形成共享基特征 $b$。
+
+对每个预测时域 $h_j$，模型维护一个可学习 horizon embedding $e_j$，并用它与共享特征共同构造 query：
+\begin{equation}
+q_j = W_q [b; e_j].
+\end{equation}
+该 query 对历史编码序列执行交叉注意力，得到该时域专属的时间摘要
+\begin{equation}
+\alpha_j = \mathrm{softmax}(q_j H^\top), \qquad
+z_j = \alpha_j H.
+\end{equation}
+最终解码特征为
+\begin{equation}
+d_j = \phi([b; z_j; e_j]),
+\end{equation}
+其中 $\phi(\cdot)$ 是一个小型前馈投影模块。与 GRU 基线相比，这一结构允许不同 horizon 从同一段历史中读取不同的信息子集。
+
+\subsection{所提出的多尺度 Horizon-Query Transformer}
+
+最终模型在单尺度 horizon-query decoder 的基础上，引入显式双时间尺度编码。其核心出发点是：30 分钟历史中既包含局部机动信息，也包含更粗粒度的阶段性变化，而 60--120 分钟预测往往更依赖后者。
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig1_method_architecture.pdf}
+\caption{所提出的多尺度 horizon-query H3 预测器概览。所有模型变体共享相同的层级 H3 输出头；最终模型在单尺度 horizon-query 结构上增加显式粗尺度时间分支。}
+\label{fig:method-architecture-zh}
+\end{figure}
+
+具体地，细尺度分支先得到历史编码序列 $H^{(f)}$。然后按照 stride $=2$ 对细尺度序列做带掩码的局部均值池化，在本文的 6 步历史设置下得到 3 步粗尺度序列，再通过额外的单层 Transformer encoder 得到
+\begin{equation}
+H^{(c)} = \mathrm{Enc}_{\text{coarse}}(\mathrm{Pool}(H^{(f)})).
+\end{equation}
+同一个 horizon query $q_j$ 分别对细尺度和粗尺度序列进行注意力检索：
+\begin{equation}
+\alpha_j^{(f)} = \mathrm{softmax}(q_j {H^{(f)}}^\top), \qquad
+\alpha_j^{(c)} = \mathrm{softmax}(q_j {H^{(c)}}^\top),
+\end{equation}
+\begin{equation}
+z_j^{(f)} = \alpha_j^{(f)} H^{(f)}, \qquad
+z_j^{(c)} = \alpha_j^{(c)} H^{(c)}.
+\end{equation}
+最终的 horizon 专属解码特征写为
+\begin{equation}
+d_j = \phi_{\text{ms}}([b; z_j^{(f)}; z_j^{(c)}; e_j]).
+\end{equation}
+其中 $\phi_{\text{ms}}$ 是多尺度特征融合模块。所有粗区域头、状态头和条件子区域头都共享这一解码协议，只是输入的 $d_j$ 由单尺度或多尺度时间编码器决定。
+
+\subsection{训练目标与可选正则}
+
+在层级模型中，粗区域、子区域和状态三项损失都采用交叉熵，并仅在有效标签上累计。设 $\mathcal{V}$ 为可用 horizon 集合，则一个 mini-batch 的层级损失可写为
+\begin{equation}
+\mathcal{L}_{\text{hier}}
+=
+\frac{1}{|\mathcal{V}|}
+\sum_{j \in \mathcal{V}}
+\big(
+\mathcal{L}^{(j)}_{\text{coarse}}
++
+\mathcal{L}^{(j)}_{\text{child}}
++
+\mathcal{L}^{(j)}_{\text{status}}
+\big).
+\end{equation}
+项目中还实现了一个可选的相邻 horizon 解码特征一致性项，即对 $d_j$ 与 $d_{j+1}$ 的均方差施加惩罚，并按相邻 horizon 间隔做缩放。但在 devsplit 和 full-scale 实验中，该项未带来稳定收益，因此最终模型设置为 $\lambda_{\text{cons}}=0$。
+
+\subsection{推理时后处理：Reachability 与 H3 Refinement}
+
+完整推理流程包含两类后处理，但它们与主模型分开评估。第一类是 reachability filter。对每个 horizon，系统根据当前 H3 cell 中心与候选目标 cell 中心之间的球面距离构造可达性掩码；若某目标 cell 的距离超过
+\begin{equation}
+d_{\max}(h_j)
+=
+v_{\max}\cdot 1.852 \cdot \frac{h_j}{60}
++
+\Delta,
+\end{equation}
+则其概率被置零并重新归一化。本文默认采用 $v_{\max}=750$ knots、$\Delta=250$ km。第二类是 H3 neighbor refinement，它在评价阶段把部分细粒度概率质量按系数 $\alpha$ 扩散到局部 H3 邻居。由于它会显著改变概率校准，本文只把它作为消融分析，不把它计入最终主方法。

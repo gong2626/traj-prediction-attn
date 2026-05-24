@@ -1,0 +1,7 @@
+\section{Conclusion}
+
+We presented a large-scale study of multi-horizon regional aircraft trajectory forecasting on ADRR-derived open aviation data. Starting from a hierarchical H3 GRU baseline, we introduced a horizon-query Transformer decoder and extended it with an explicit multiscale temporal branch. The final model improves top-k accuracy, NLL, Brier score, and calibration relative to both the GRU baseline and a single-scale Transformer ablation, while also producing smaller candidate region sets. A classical Markov baseline is far less competitive, which confirms that the task requires richer temporal representation learning than simple empirical transition modeling can provide.
+
+The H3 refinement study further shows that candidate recall and calibration should be reported together. A model that expands candidate regions aggressively can appear stronger under recall-only analysis while becoming less trustworthy probabilistically. We therefore argue that large-scale regional aircraft forecasting should be evaluated as a joint problem of accuracy, uncertainty quality, and spatial efficiency.
+
+Overall, the results support hierarchical H3 forecasting with multiscale horizon-query temporal encoding as a strong baseline for long-horizon regional aviation prediction on open trajectory archives. They also provide a stable foundation for the next methodological step: explicitly uncertainty-aware forecasting under missing and irregular flight observations.
