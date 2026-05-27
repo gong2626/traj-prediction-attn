@@ -24,7 +24,7 @@ H3 refinement is not the default final method. It is an optional recall-oriented
 2. A hierarchical coarse-to-fine probabilistic H3 decoder for scalable global regional prediction.
 3. A multiscale horizon-query Transformer that improves top-k accuracy, likelihood, Brier score, and calibration over a hierarchical GRU baseline.
 4. A full-scale comparison against a classical Markov regional transition baseline, a hierarchical GRU baseline, and a Transformer structural ablation.
-5. A candidate-region evaluation protocol that jointly reports recall, candidate cell count, candidate area, and calibration.
+5. A candidate-region evaluation protocol that emphasizes fixed-budget coverage and physical area, while retaining probability-mass union diagnostics as secondary analysis.
 6. A full-scale ablation showing that H3 neighbor refinement improves candidate recall but trades off calibration.
 
 ## 1. Introduction
@@ -69,7 +69,7 @@ H3 refinement is not the default final method. It is an optional recall-oriented
 - subset baseline for fast ablations
 - full-scale reference baseline
 - classical Markov regional transition baseline
-- metrics: top-k, candidate coverage, NLL, Brier, ECE, runtime
+- metrics: top-k, NLL, Brier, ECE, fixed-budget candidate coverage, candidate area, and secondary union diagnostics
 
 ## 7. Results
 
@@ -77,30 +77,30 @@ H3 refinement is not the default final method. It is an optional recall-oriented
 
 Macro mean over 10/30/60/120 minute horizons:
 
-| Run | Top1 | Top3 | Top5 | NLL | Brier | ECE | Union Cover | Union Cells | Union Area km2 | Cover at Budget |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| full Markov baseline | 0.3184 | 0.6166 | 0.7587 | 2.2788 | 0.8111 | 0.0323 | 0.8749 | 9.9542 | 545174 | 0.9699 |
-| full GRU baseline | 0.6648 | 0.9076 | 0.9631 | 1.0214 | 0.4578 | 0.0180 | 0.8931 | 2.4189 | 128965 | 0.9980 |
-| transformer horizon ablation | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.8920 | 2.2721 | 122553 | 0.9981 |
-| full final multiscale | 0.6827 | 0.9174 | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.8922 | 2.1829 | 118810 | 0.9983 |
+| Run | Top1 | Top3 | Top5 | NLL | Brier | ECE | Cover at Budget | Union Area km2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| full Markov baseline | 0.3184 | 0.6166 | 0.7587 | 2.2788 | 0.8111 | 0.0323 | 0.9699 | 545174 |
+| full GRU baseline | 0.6648 | 0.9076 | 0.9631 | 1.0214 | 0.4578 | 0.0180 | 0.9980 | 128965 |
+| transformer horizon ablation | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.9981 | 122553 |
+| full final multiscale | 0.6827 | 0.9174 | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.9983 | 118810 |
 
 Interpretation:
 
 - the Markov baseline gives a classical non-neural reference and is far below all learned models
 - the final model improves top-k, NLL, Brier, and ECE on every horizon
-- the final model produces smaller candidate sets and smaller candidate area
-- probability-mass candidate coverage is essentially tied because the final model is sharper
+- the final model produces smaller candidate areas while preserving fixed-budget coverage
+- probability-mass union coverage is better treated as a secondary diagnostic because sharper models can lose union recall while still improving the operationally cleaner fixed-budget metric
 
 ### Horizon-Wise Main Result
 
 Delta: final multiscale minus full GRU baseline.
 
-| Horizon | dTop1 | dTop3 | dTop5 | dNLL | dBrier | dECE | dUnion Cover | dUnion Cells | dUnion Area km2 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10m | +0.0199 | +0.0059 | +0.0031 | -0.0516 | -0.0281 | -0.0085 | -0.0004 | -0.1864 | -2316 |
-| 30m | +0.0214 | +0.0129 | +0.0076 | -0.0759 | -0.0303 | -0.0210 | -0.0052 | -0.3683 | -4567 |
-| 60m | +0.0115 | +0.0054 | +0.0018 | -0.0340 | -0.0158 | -0.0016 | +0.0023 | -0.0908 | -7705 |
-| 120m | +0.0190 | +0.0153 | +0.0092 | -0.0674 | -0.0220 | -0.0040 | -0.0005 | -0.2988 | -26031 |
+| Horizon | dTop1 | dTop3 | dTop5 | dNLL | dBrier | dECE | dCover at Budget | dUnion Area km2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10m | +0.0199 | +0.0059 | +0.0031 | -0.0516 | -0.0281 | -0.0085 | +0.0001 | -2316 |
+| 30m | +0.0214 | +0.0129 | +0.0076 | -0.0759 | -0.0303 | -0.0210 | +0.0006 | -4567 |
+| 60m | +0.0115 | +0.0054 | +0.0018 | -0.0340 | -0.0158 | -0.0016 | +0.0001 | -7705 |
+| 120m | +0.0190 | +0.0153 | +0.0092 | -0.0674 | -0.0220 | -0.0040 | +0.0004 | -26031 |
 
 ### Training Summary
 
@@ -115,10 +115,10 @@ Delta: final multiscale minus full GRU baseline.
 
 Macro mean:
 
-| Run | Top1 | Top3 | Top5 | NLL | Brier | ECE | Union Cover | Union Cells | Union Area km2 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| transformer horizon ablation | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.8920 | 2.2721 | 122553 |
-| multiscale final | 0.6827 | 0.9174 | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.8922 | 2.1829 | 118810 |
+| Run | Top1 | Top3 | Top5 | NLL | Brier | ECE | Cover at Budget | Union Area km2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| transformer horizon ablation | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.9981 | 122553 |
+| multiscale final | 0.6827 | 0.9174 | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.9983 | 118810 |
 
 Conclusion:
 
@@ -129,16 +129,16 @@ Conclusion:
 
 Macro mean:
 
-| Run | Top5 | NLL | Brier | ECE | Union Cover | Union Cells | Union Area km2 | Cover at Budget |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| final | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.8922 | 2.1829 | 118810 | 0.9983 |
-| refine a005 | 0.9677 | 0.9593 | 0.4344 | 0.0310 | 0.9052 | 2.3315 | 127062 | 0.9987 |
-| refine a010 | 0.9673 | 0.9796 | 0.4372 | 0.0585 | 0.9192 | 2.5168 | 137220 | 0.9987 |
-| refine a020 | 0.9662 | 1.0340 | 0.4493 | 0.1135 | 0.9496 | 3.0980 | 167889 | 0.9987 |
+| Run | Top5 | NLL | Brier | ECE | Cover at Budget | Union Area km2 | Union Cover |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| final | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.9983 | 118810 | 0.8922 |
+| refine a005 | 0.9677 | 0.9593 | 0.4344 | 0.0310 | 0.9987 | 127062 | 0.9052 |
+| refine a010 | 0.9673 | 0.9796 | 0.4372 | 0.0585 | 0.9987 | 137220 | 0.9192 |
+| refine a020 | 0.9662 | 1.0340 | 0.4493 | 0.1135 | 0.9987 | 167889 | 0.9496 |
 
 Conclusion:
 
-- H3 refinement improves probability-mass candidate coverage
+- H3 refinement improves the secondary probability-mass union-cover diagnostic
 - it worsens calibration substantially on full data
 - it should be framed as a recall-vs-calibration trade-off
 

@@ -28,6 +28,7 @@ from regional_forecast.models.forecast_model import (
     HierarchicalH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleGatedLocalTransformerH3RegionalForecaster,
     MultiscaleLocalCausalTransformerH3RegionalForecaster,
     MultiscaleTransformerH3RegionalForecaster,
     TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
@@ -52,6 +53,47 @@ def _resolve_device(cfg: ProjectConfig) -> torch.device:
     return torch.device("cpu")
 
 
+def _collate_batch(batch):
+    if isinstance(batch, dict):
+        return batch
+    return default_collate(batch)
+
+
+def _initialize_from_checkpoint_if_requested(cfg: ProjectConfig, model: nn.Module) -> None:
+    init_from = cfg.training.init_from_checkpoint
+    if init_from is None:
+        return
+
+    init_path = cfg.resolve_path(init_from)
+    if init_path is None or not init_path.exists():
+        raise FileNotFoundError(f"Initialization checkpoint not found: {init_from}")
+
+    checkpoint = torch.load(init_path, map_location="cpu", weights_only=False)
+    source_state = checkpoint.get("model_state", checkpoint)
+    if not isinstance(source_state, dict):
+        raise ValueError(f"Initialization checkpoint does not contain a model_state dict: {init_path}")
+
+    target_state = model.state_dict()
+    compatible_state = {
+        key: value
+        for key, value in source_state.items()
+        if key in target_state and isinstance(value, torch.Tensor) and target_state[key].shape == value.shape
+    }
+    missing_keys, unexpected_keys = model.load_state_dict(compatible_state, strict=False)
+    frozen_parameter_count = 0
+    if cfg.training.freeze_initialized_parameters:
+        for name, parameter in model.named_parameters():
+            if name in compatible_state:
+                parameter.requires_grad_(False)
+                frozen_parameter_count += parameter.numel()
+    print(
+        "Initialized model from checkpoint "
+        f"{init_path} with {len(compatible_state)} matched tensors; "
+        f"missing={len(missing_keys)}, unexpected={len(unexpected_keys)}, "
+        f"frozen_params={frozen_parameter_count}."
+    )
+
+
 def _stack_loader(
     dataset: RegionalForecastDataset,
     batch_size: int,
@@ -62,17 +104,12 @@ def _stack_loader(
 ) -> DataLoader:
     use_workers = max(0, int(num_workers))
 
-    def _collate(batch):
-        if isinstance(batch, dict):
-            return batch
-        return default_collate(batch)
-
     loader_kwargs = {
         "dataset": dataset,
         "num_workers": use_workers,
         "pin_memory": bool(pin_memory and use_workers > 0),
         "persistent_workers": bool(persistent_workers and use_workers > 0),
-        "collate_fn": _collate,
+        "collate_fn": _collate_batch,
     }
     if use_workers > 0:
         loader_kwargs["prefetch_factor"] = 2
@@ -447,6 +484,20 @@ def _build_model(cfg: ProjectConfig, train_ds: RegionalForecastDataset):
             max_history_steps=int(train_ds.metadata["history_steps"]),
             config=cfg.model,
         )
+    if model_type == "multiscale_transformer_h3_gated_local":
+        return model_type, MultiscaleGatedLocalTransformerH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
     if model_type == "attention_tcn_gru_h3":
         return model_type, AttentionTCNGRUHierarchicalH3RegionalForecaster(
             input_num_region_classes=train_ds.metadata["input_num_region_classes"],
@@ -545,6 +596,17 @@ def _move_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[st
     }
 
 
+def _accumulate_weighted_loss(
+    total: Optional[torch.Tensor],
+    loss: torch.Tensor,
+    batch_size: int,
+) -> torch.Tensor:
+    contribution = loss.detach() * int(batch_size)
+    if total is None:
+        return contribution
+    return total + contribution
+
+
 def run_training(
     cfg: ProjectConfig,
     *,
@@ -566,6 +628,7 @@ def run_training(
     summary_path = cfg.checkpoint_dir / f"{cfg.output.run_name}_train_summary.json"
 
     model_type, model = _build_model(cfg, train_ds)
+    _initialize_from_checkpoint_if_requested(cfg, model)
 
     if model_type == "markov":
         model.fit(
@@ -686,7 +749,7 @@ def run_training(
     last_checkpoint_path = _last_checkpoint_path(checkpoint_path)
     for epoch in range(start_epoch, cfg.training.epochs + 1):
         model.train()
-        train_loss = 0.0
+        train_loss_total: Optional[torch.Tensor] = None
         train_count = 0
 
         for raw_batch in train_loader:
@@ -714,12 +777,13 @@ def run_training(
             scaler.update()
 
             batch_size = batch["region_labels"].shape[0]
-            train_loss += loss.item() * batch_size
+            train_loss_total = _accumulate_weighted_loss(train_loss_total, loss, int(batch_size))
             train_count += batch_size
 
         model.eval()
-        val_loss = 0.0
+        val_loss_total: Optional[torch.Tensor] = None
         val_count = 0
+        val_has_non_finite = False
         with torch.no_grad():
             for raw_batch in val_loader:
                 batch = _move_batch(raw_batch, device)
@@ -734,17 +798,27 @@ def run_training(
                     )
 
                 if not torch.isfinite(loss):
-                    val_loss = float("inf")
-                    val_count = 1
+                    val_has_non_finite = True
                     print("Encountered non-finite validation batch loss.")
                     break
 
                 batch_size = batch["region_labels"].shape[0]
-                val_loss += loss.item() * batch_size
+                val_loss_total = _accumulate_weighted_loss(val_loss_total, loss, int(batch_size))
                 val_count += batch_size
 
-        train_epoch_loss = train_loss / max(train_count, 1)
-        val_epoch_loss = val_loss / max(val_count, 1)
+        train_epoch_loss = (
+            0.0
+            if train_loss_total is None
+            else float((train_loss_total / max(train_count, 1)).item())
+        )
+        if val_has_non_finite:
+            val_epoch_loss = float("inf")
+        else:
+            val_epoch_loss = (
+                0.0
+                if val_loss_total is None
+                else float((val_loss_total / max(val_count, 1)).item())
+            )
         scheduler.step(val_epoch_loss)
         current_lr = float(optimizer.param_groups[0]["lr"])
         history.append({"epoch": epoch, "train_loss": train_epoch_loss, "val_loss": val_epoch_loss})

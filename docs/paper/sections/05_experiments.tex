@@ -16,7 +16,7 @@ This baseline stack is deliberately aligned with the problem setting. For TrAISf
 
 \subsection{Metrics}
 
-We report region top-1/top-3/top-5 accuracy, region NLL, region Brier score, region ECE with 10 calibration bins, candidate union cover, candidate union cell count, candidate union area, cover at fixed cell budget, and status accuracy. In practice, status accuracy saturates at 1.0 in all full-scale runs and is therefore not a discriminative metric for model ranking. The main analysis focuses on regional and candidate-set behavior.
+We report eight headline metrics in the main tables: region top-1/top-3/top-5 accuracy, region NLL, region Brier score, region ECE with 10 calibration bins, cover at a fixed per-horizon cell budget, and candidate union area. We also retain candidate union cover and candidate union cell count as secondary diagnostics. This separation is intentional: probability-mass union coverage can be increased simply by expanding the candidate set, so it is more informative when interpreted together with compactness rather than treated as a standalone headline metric. In practice, status accuracy saturates at 1.0 in all full-scale runs and is therefore not a discriminative metric for model ranking. The main analysis focuses on regional quality, calibration, and budgeted candidate-set utility.
 
 \subsection{Implementation details}
 

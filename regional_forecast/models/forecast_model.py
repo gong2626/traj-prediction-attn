@@ -1142,3 +1142,209 @@ class MultiscaleLocalCausalTransformerH3RegionalForecaster(MultiscaleTransformer
             "coarse_attention_weights": coarse_weights,
             "local_attention_weights": local_attention_weights,
         }
+
+
+class MultiscaleGatedLocalTransformerH3RegionalForecaster(MultiscaleTransformerH3RegionalForecaster):
+    def __init__(
+        self,
+        input_num_region_classes: int,
+        input_parent_num_region_classes: int,
+        num_coarse_region_classes_per_horizon: list[int],
+        child_count_by_coarse_per_horizon: list[list[int]],
+        max_children_per_horizon: list[int],
+        num_status_classes: int,
+        num_numeric_features: int,
+        num_mask_features: int,
+        num_context_features: int,
+        max_history_steps: int,
+        config: ModelConfig,
+    ):
+        super().__init__(
+            input_num_region_classes=input_num_region_classes,
+            input_parent_num_region_classes=input_parent_num_region_classes,
+            num_coarse_region_classes_per_horizon=num_coarse_region_classes_per_horizon,
+            child_count_by_coarse_per_horizon=child_count_by_coarse_per_horizon,
+            max_children_per_horizon=max_children_per_horizon,
+            num_status_classes=num_status_classes,
+            num_numeric_features=num_numeric_features,
+            num_mask_features=num_mask_features,
+            num_context_features=num_context_features,
+            max_history_steps=max_history_steps,
+            config=config,
+        )
+        self.short_term_branch_steps = max(0, int(config.short_term_branch_steps))
+        self.short_term_branch_horizons = max(
+            0,
+            min(self.num_horizons, int(config.short_term_branch_horizons)),
+        )
+        self.short_term_gate_bias = float(config.short_term_gate_bias)
+        local_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.hidden_dim,
+            nhead=config.transformer_num_heads,
+            dim_feedforward=config.transformer_ffn_dim,
+            dropout=config.short_term_branch_dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=False,
+        )
+        self.local_causal_encoder = nn.TransformerEncoder(
+            local_encoder_layer,
+            num_layers=max(1, int(config.short_term_branch_num_layers)),
+            enable_nested_tensor=False,
+        )
+        gate_hidden_dim = max(16, int(config.short_term_gate_hidden_dim))
+        residual_dropout = float(config.short_term_residual_dropout)
+        self.local_residual_projection = nn.Sequential(
+            nn.Linear(config.hidden_dim + config.horizon_embedding_dim, gate_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(residual_dropout),
+            nn.Linear(gate_hidden_dim, self.feature_dim),
+        )
+        self.local_gate_projection = nn.Sequential(
+            nn.Linear(self.feature_dim * 2 + config.horizon_embedding_dim, gate_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(residual_dropout),
+            nn.Linear(gate_hidden_dim, 1),
+        )
+        nn.init.zeros_(self.local_residual_projection[-1].weight)
+        nn.init.zeros_(self.local_residual_projection[-1].bias)
+        nn.init.zeros_(self.local_gate_projection[-1].weight)
+        nn.init.constant_(self.local_gate_projection[-1].bias, self.short_term_gate_bias)
+
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        return torch.triu(
+            torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
+            diagonal=1,
+        )
+
+    def encode(
+        self,
+        region_seq: torch.Tensor,
+        parent_region_seq: torch.Tensor,
+        numeric_seq: torch.Tensor,
+        mask_seq: torch.Tensor,
+        context: torch.Tensor,
+        retrieved_features: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        region_features = self.region_embedding(region_seq)
+        parent_region_features = self.parent_region_embedding(parent_region_seq)
+        numeric_features = self.numeric_projection(numeric_seq)
+        mask_features = self.mask_projection(mask_seq)
+        encoded_input = torch.cat(
+            [region_features, parent_region_features, numeric_features, mask_features],
+            dim=-1,
+        )
+
+        seq_len = int(encoded_input.shape[1])
+        if seq_len > self.max_history_steps:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds max_history_steps={self.max_history_steps}."
+            )
+
+        temporal_mask = self._temporal_mask(region_seq, mask_seq)
+        position_ids = torch.arange(seq_len, device=encoded_input.device, dtype=torch.long)
+        position_features = self.position_embedding(position_ids).unsqueeze(0)
+        transformer_input = self.sequence_input_projection(encoded_input) + position_features
+        transformer_input = self.sequence_dropout(self.sequence_layer_norm(transformer_input))
+        fine_sequence = self.encoder(
+            transformer_input,
+            src_key_padding_mask=~temporal_mask,
+        )
+        coarse_input, coarse_mask = self._pool_multiscale(fine_sequence, temporal_mask)
+        coarse_sequence = self.coarse_encoder(
+            coarse_input,
+            src_key_padding_mask=~coarse_mask,
+        )
+
+        summary = self._masked_mean_pool(fine_sequence, temporal_mask)
+        context_features = self.context_projection(context)
+        base_features = torch.cat([summary, context_features], dim=-1)
+
+        if retrieved_features is not None:
+            base_features = base_features + retrieved_features
+
+        base_features = self.dropout(base_features)
+        horizon_ids = torch.arange(self.num_horizons, device=base_features.device, dtype=torch.long)
+        horizon_embeds = self.horizon_embedding(horizon_ids).unsqueeze(0).expand(base_features.shape[0], -1, -1)
+        query_input = torch.cat(
+            [base_features.unsqueeze(1).expand(-1, self.num_horizons, -1), horizon_embeds],
+            dim=-1,
+        )
+        queries = self.horizon_query_projection(query_input)
+
+        fine_logits = torch.einsum("bhd,bsd->bhs", queries, fine_sequence)
+        fine_logits = fine_logits.masked_fill(~temporal_mask.unsqueeze(1), torch.finfo(fine_logits.dtype).min)
+        fine_weights = torch.softmax(fine_logits, dim=-1)
+        fine_attended = torch.einsum("bhs,bsd->bhd", fine_weights, fine_sequence)
+
+        coarse_logits = torch.einsum("bhd,btd->bht", queries, coarse_sequence)
+        coarse_logits = coarse_logits.masked_fill(~coarse_mask.unsqueeze(1), torch.finfo(coarse_logits.dtype).min)
+        coarse_weights = torch.softmax(coarse_logits, dim=-1)
+        coarse_attended = torch.einsum("bht,btd->bhd", coarse_weights, coarse_sequence)
+
+        decoder_input = torch.cat(
+            [
+                base_features.unsqueeze(1).expand(-1, self.num_horizons, -1),
+                fine_attended,
+                coarse_attended,
+                horizon_embeds,
+            ],
+            dim=-1,
+        )
+        decoder_features = self.scale_feature_projection(decoder_input)
+
+        local_attention_weights = fine_attended.new_zeros((fine_attended.shape[0], self.num_horizons, 0))
+        local_gate_values = fine_attended.new_zeros((fine_attended.shape[0], self.num_horizons, 1))
+        if self.short_term_branch_steps > 0 and self.short_term_branch_horizons > 0:
+            local_seq_len = min(seq_len, self.short_term_branch_steps)
+            local_start = seq_len - local_seq_len
+            local_input = fine_sequence[:, local_start:, :]
+            local_mask = temporal_mask[:, local_start:]
+            local_sequence = self.local_causal_encoder(
+                local_input,
+                mask=self._causal_mask(local_seq_len, local_input.device),
+                src_key_padding_mask=~local_mask,
+            )
+            local_queries = queries[:, :self.short_term_branch_horizons, :]
+            local_logits = torch.einsum("bhd,bsd->bhs", local_queries, local_sequence)
+            local_logits = local_logits.masked_fill(~local_mask.unsqueeze(1), torch.finfo(local_logits.dtype).min)
+            local_weights = torch.softmax(local_logits, dim=-1)
+            local_attended = torch.einsum("bhs,bsd->bhd", local_weights, local_sequence)
+
+            local_residual_input = torch.cat(
+                [
+                    local_attended,
+                    horizon_embeds[:, :self.short_term_branch_horizons, :],
+                ],
+                dim=-1,
+            )
+            local_delta = self.local_residual_projection(local_residual_input)
+            gate_input = torch.cat(
+                [
+                    decoder_features[:, :self.short_term_branch_horizons, :],
+                    local_delta,
+                    horizon_embeds[:, :self.short_term_branch_horizons, :],
+                ],
+                dim=-1,
+            )
+            gate_values = torch.sigmoid(self.local_gate_projection(gate_input))
+            decoder_features = decoder_features.clone()
+            decoder_features[:, :self.short_term_branch_horizons, :] = (
+                decoder_features[:, :self.short_term_branch_horizons, :]
+                + gate_values * local_delta
+            )
+
+            local_attention_weights = fine_attended.new_zeros(
+                (fine_attended.shape[0], self.num_horizons, local_seq_len)
+            )
+            local_attention_weights[:, :self.short_term_branch_horizons, :] = local_weights
+            local_gate_values[:, :self.short_term_branch_horizons, :] = gate_values
+
+        return {
+            "features": base_features,
+            "decoder_features": decoder_features,
+            "attention_weights": fine_weights,
+            "coarse_attention_weights": coarse_weights,
+            "local_attention_weights": local_attention_weights,
+            "local_gate_values": local_gate_values,
+        }

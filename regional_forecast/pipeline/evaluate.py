@@ -29,6 +29,7 @@ from regional_forecast.models.forecast_model import (
     HierarchicalH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
+    MultiscaleGatedLocalTransformerH3RegionalForecaster,
     MultiscaleLocalCausalTransformerH3RegionalForecaster,
     MultiscaleTransformerH3RegionalForecaster,
     TransformerHorizonDecoderHierarchicalH3RegionalForecaster,
@@ -155,6 +156,20 @@ def _load_model(cfg: ProjectConfig, dataset: RegionalForecastDataset):
             max_history_steps=int(dataset.metadata["history_steps"]),
             config=cfg.model,
         )
+    elif model_type == "multiscale_transformer_h3_gated_local":
+        model = MultiscaleGatedLocalTransformerH3RegionalForecaster(
+            input_num_region_classes=dataset.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=dataset.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=dataset.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(dataset.metadata),
+            max_children_per_horizon=dataset.metadata["max_children_per_horizon"],
+            num_status_classes=dataset.metadata["num_status_classes"],
+            num_numeric_features=dataset.metadata["num_numeric_features"],
+            num_mask_features=dataset.metadata["num_mask_features"],
+            num_context_features=dataset.metadata["num_context_features"],
+            max_history_steps=int(dataset.metadata["history_steps"]),
+            config=cfg.model,
+        )
     elif model_type == "attention_tcn_gru_h3":
         model = AttentionTCNGRUHierarchicalH3RegionalForecaster(
             input_num_region_classes=dataset.metadata["input_num_region_classes"],
@@ -217,20 +232,21 @@ def _move_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[st
     }
 
 
+def _collate_batch(batch):
+    if isinstance(batch, dict):
+        return batch
+    return default_collate(batch)
+
+
 def _stack_loader(dataset: RegionalForecastDataset, batch_size: int, num_workers: int, pin_memory: bool, persistent_workers: bool) -> DataLoader:
     use_workers = max(0, int(num_workers))
-
-    def _collate(batch):
-        if isinstance(batch, dict):
-            return batch
-        return default_collate(batch)
 
     loader_kwargs = {
         "dataset": dataset,
         "num_workers": use_workers,
         "pin_memory": bool(pin_memory and use_workers > 0),
         "persistent_workers": bool(persistent_workers and use_workers > 0),
-        "collate_fn": _collate,
+        "collate_fn": _collate_batch,
     }
     if use_workers > 0:
         loader_kwargs["prefetch_factor"] = 2
@@ -502,6 +518,7 @@ def _predict_probs(cfg: ProjectConfig, dataset: RegionalForecastDataset, model_t
         "transformer_horizon_decoder",
         "multiscale_transformer_h3",
         "multiscale_transformer_h3_local_causal",
+        "multiscale_transformer_h3_gated_local",
         "attention_tcn_gru_h3",
         "traisformer_h3",
         "flightbertpp_h3",
@@ -814,6 +831,7 @@ def run_evaluation(cfg: ProjectConfig) -> None:
         "transformer_horizon_decoder",
         "multiscale_transformer_h3",
         "multiscale_transformer_h3_local_causal",
+        "multiscale_transformer_h3_gated_local",
         "attention_tcn_gru_h3",
         "traisformer_h3",
         "flightbertpp_h3",

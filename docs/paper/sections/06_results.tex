@@ -10,7 +10,7 @@ Table~\ref{tab:main-results} reports macro means across the four forecast horizo
 \resizebox{\textwidth}{!}{%
 \input{tables/main_results.tex}
 }
-\caption{Macro-mean full-scale comparison across 10, 30, 60, and 120 minute horizons.}
+\caption{Macro-mean full-scale comparison across 10, 30, 60, and 120 minute horizons using the eight headline metrics. Secondary candidate diagnostics such as union cover are discussed separately.}
 \label{tab:main-results}
 \end{table*}
 
@@ -21,9 +21,9 @@ Table~\ref{tab:main-results} reports macro means across the four forecast horizo
 \label{fig:main-results-overview}
 \end{figure}
 
-Three observations stand out. First, all learned hierarchical models strongly outperform the classical Markov baseline. Second, among the two adapted external baselines, TrAISformer-H3 is the strongest competitor: it attains the best macro top-3/top-5, the lowest NLL, and the highest union cover. Third, the proposed multiscale model still achieves the best macro top-1 (0.6827), the best Brier score (0.4338), and the smallest candidate union cell count (2.1829), which makes it the most balanced method in terms of correctness, probabilistic quality, and candidate compactness.
+Three observations stand out. First, all learned hierarchical models strongly outperform the classical Markov baseline. Second, among the two adapted external baselines, TrAISformer-H3 is the strongest competitor on ranking and likelihood: it attains the best macro top-3/top-5, the lowest NLL, and the best fixed-budget coverage. Third, the proposed multiscale model still achieves the best macro top-1 (0.6827) and the best Brier score (0.4338) while remaining competitive on ECE, fixed-budget coverage, and candidate area, which makes it the most balanced single-model method in terms of correctness, probabilistic quality, and spatial efficiency.
 
-FlightBERT++-H3 exhibits a different trade-off. It obtains the lowest macro ECE (0.0086) and the smallest candidate union area (117,593 km$^2$), but it remains behind the proposed model on top-1/top-3/top-5 and union cover. This indicates that tighter and more conservative candidate sets do not automatically translate into better regional forecasting when ranking quality weakens.
+FlightBERT++-H3 exhibits a different trade-off. It obtains the lowest macro ECE (0.0086) and the smallest candidate union area (117,593 km$^2$), but it remains behind the proposed model on top-1/top-3/top-5. This indicates that tighter and more conservative candidate sets do not automatically translate into better regional forecasting when ranking quality weakens.
 
 The per-horizon results also clarify where the multiscale design matters. TrAISformer-H3 is slightly stronger on top-3/top-5 at 10 and 30 minutes, but the proposed model regains a clear advantage at 120 minutes: top-1 rises from 0.5481 to 0.5565, top-3 from 0.8482 to 0.8531, and top-5 from 0.9355 to 0.9372, while NLL, Brier, and ECE all improve as well. This supports our central claim that explicit multiscale temporal modeling contributes most strongly to medium- and long-horizon regional forecasting rather than only improving short-horizon ranking metrics.
 
@@ -57,7 +57,7 @@ To isolate the value of explicit multiscale temporal encoding, we compare the fi
 \label{tab:structural-ablation}
 \end{table}
 
-The multiscale branch improves every main macro metric and also reaches a lower validation loss (0.3055 vs. 0.3177). This supports the claim that explicit dual-scale temporal modeling adds value beyond simply replacing the GRU with a Transformer.
+The multiscale branch improves every headline metric in this ablation and also reaches a lower validation loss (0.3055 vs. 0.3177). This supports the claim that explicit dual-scale temporal modeling adds value beyond simply replacing the GRU with a Transformer.
 
 \subsection{H3-neighbor refinement is a recall-versus-calibration trade-off}
 
@@ -69,18 +69,18 @@ We next evaluate H3-neighbor refinement with three diffusion strengths. The refi
 \resizebox{\columnwidth}{!}{%
 \input{tables/h3_refinement_sweep.tex}
 }
-\caption{H3-neighbor refinement sweep on the full dataset. Higher union cover comes with worse calibration and larger candidate sets.}
+\caption{H3-neighbor refinement sweep on the full dataset. The rightmost union-cover diagnostic rises, but only alongside worse calibration and larger candidate areas.}
 \label{tab:h3-refine}
 \end{table}
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{figures/fig3_h3_refinement_tradeoff.pdf}
-\caption{H3-neighbor refinement increases candidate union coverage, but the added recall comes with worse calibration and larger spatial candidate areas.}
+\caption{H3-neighbor refinement increases the union-cover diagnostic, but the added recall comes with worse calibration and larger spatial candidate areas.}
 \label{fig:h3-refinement-tradeoff}
 \end{figure}
 
-The refinement increases candidate union cover, but it quickly degrades calibration and eventually worsens top-5 and NLL. Therefore, it should not be presented as the final model. Its value lies in exposing a useful operational trade-off: local spatial smoothing can improve recall, but only by sacrificing confidence quality and spatial compactness.
+The refinement increases the secondary union-cover diagnostic, but it quickly degrades calibration and eventually worsens top-5 and NLL. Therefore, it should not be presented as the final model. Its value lies in exposing a useful operational trade-off: local spatial smoothing can improve probability-mass recall, but only by sacrificing confidence quality and spatial compactness.
 
 \subsection{Reachability filtering has a small aggregate effect}
 

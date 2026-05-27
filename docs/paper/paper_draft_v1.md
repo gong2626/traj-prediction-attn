@@ -45,7 +45,7 @@ Our model adopts this principle directly: each horizon is represented by a learn
 
 For safety-relevant or operational forecasting tasks, accuracy alone is insufficient; predictive probabilities should also be calibrated. Guo et al. showed that modern neural networks can be substantially miscalibrated even when they are accurate \cite{guo2017calibration}. This issue is especially important for trajectory forecasting, where a candidate region set may look operationally useful while being probabilistically overconfident or spatially bloated.
 
-Our evaluation therefore reports not only top-k accuracy, but also negative log-likelihood (NLL), Brier score, and expected calibration error (ECE). In addition, we evaluate candidate-region quality using probability-mass candidate coverage, candidate cell count, and candidate area. This lets us distinguish sharper and better-calibrated models from models that achieve high recall only by spreading mass over larger regions.
+Our evaluation therefore reports not only top-k accuracy, but also negative log-likelihood (NLL), Brier score, and expected calibration error (ECE). In addition, we evaluate candidate-region quality using fixed-budget coverage, candidate area, and secondary probability-mass union diagnostics. This lets us distinguish sharper and better-calibrated models from models that achieve high recall only by spreading mass over larger regions.
 
 ### 2.4 Open aviation trajectory data and hierarchical spatial indexing
 
@@ -71,14 +71,17 @@ The target is not a single coordinate but a future **region distribution**. This
 
 We use a hierarchical output space. For each horizon, the fine target H3 resolution is paired with a coarser parent resolution. The model first predicts the coarse parent region and then predicts the child cell conditional on that parent. This reduces output complexity and matches the hierarchical structure of H3.
 
-Given predicted probabilities, we evaluate both classification quality and candidate-region quality. The main probabilistic metrics are NLL, Brier score, and ECE. The main candidate-region metrics are:
+Given predicted probabilities, we evaluate both classification quality and candidate-region quality. The main probabilistic metrics are NLL, Brier score, and ECE. The headline candidate-region metrics are:
 
-- **candidate union cover**: whether the ground-truth target is contained in the constructed candidate set,
-- **candidate union cell count**: the mean number of cells in the candidate set,
-- **candidate union area**: the mean physical area covered by the candidate set,
-- **cover at budget**: recall under a fixed per-horizon cell budget.
+- **cover at budget**: recall under a fixed per-horizon cell budget,
+- **candidate union area**: the mean physical area covered by the candidate set.
 
-This evaluation design reflects the real deployment question more directly than top-k accuracy alone: a useful regional predictor should be accurate, calibrated, and spatially efficient.
+We also retain two secondary diagnostics:
+
+- **candidate union cover**: whether the ground-truth target is contained in the constructed probability-mass candidate set,
+- **candidate union cell count**: the mean number of cells in that set.
+
+This evaluation design reflects the real deployment question more directly than top-k accuracy alone: a useful regional predictor should be accurate, calibrated, and spatially efficient, and broad candidate recall should not be rewarded unless it remains compact.
 
 ## 4. Method
 
@@ -195,19 +198,16 @@ This baseline stack is deliberately aligned with the problem setting. Many prior
 
 ### 5.4 Metrics
 
-We report:
+We report eight headline metrics in the main tables:
 
 - region top-1 / top-3 / top-5 accuracy,
 - region NLL,
 - region Brier score,
 - region ECE with 10 calibration bins,
-- candidate union cover,
-- candidate union cell count,
-- candidate union area,
 - cover at fixed cell budget,
-- status accuracy.
+- candidate union area.
 
-In practice, status accuracy saturates at 1.0 in all full-scale runs and is therefore not a discriminative metric for model ranking. The main analysis focuses on regional and candidate-set behavior.
+We additionally retain candidate union cover and candidate union cell count as secondary diagnostics. In practice, status accuracy saturates at 1.0 in all full-scale runs and is therefore not a discriminative metric for model ranking. The main analysis focuses on regional quality, calibration, and budgeted candidate-set utility.
 
 ### 5.5 Implementation details
 
@@ -217,16 +217,16 @@ The final model uses a hidden dimension of 256, two Transformer layers in the fi
 
 ### 6.1 Main full-scale comparison
 
-Table 1 reports macro means across the four forecast horizons.
+Table 1 reports macro means across the four forecast horizons using the eight headline metrics.
 
-| Model | Top1 | Top3 | Top5 | NLL | Brier | ECE | Union Cover | Union Cells | Union Area km² | Cover at Budget |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Markov baseline | 0.3184 | 0.6166 | 0.7587 | 2.2788 | 0.8111 | 0.0323 | 0.8749 | 9.9542 | 545174 | 0.9699 |
-| Hierarchical GRU | 0.6648 | 0.9076 | 0.9631 | 1.0214 | 0.4578 | 0.0180 | 0.8931 | 2.4189 | 128965 | 0.9980 |
-| Transformer horizon decoder | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.8920 | 2.2721 | 122553 | 0.9981 |
-| **Proposed multiscale model** | **0.6827** | **0.9174** | **0.9685** | **0.9641** | **0.4338** | **0.0093** | 0.8922 | **2.1829** | **118810** | **0.9983** |
+| Model | Top1 | Top3 | Top5 | NLL | Brier | ECE | Cover at Budget | Union Area km^2 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Markov baseline | 0.3184 | 0.6166 | 0.7587 | 2.2788 | 0.8111 | 0.0323 | 0.9699 | 545174 |
+| Hierarchical GRU | 0.6648 | 0.9076 | 0.9631 | 1.0214 | 0.4578 | 0.0180 | 0.9980 | 128965 |
+| Transformer horizon decoder | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.9981 | 122553 |
+| **Proposed multiscale model** | **0.6827** | **0.9174** | **0.9685** | **0.9641** | **0.4338** | **0.0093** | **0.9983** | **118810** |
 
-Two observations stand out. First, all learned hierarchical models strongly outperform the classical Markov baseline. Second, the proposed multiscale model is not merely more accurate; it is also better calibrated and more spatially efficient than the GRU baseline. The candidate union cover is essentially tied with the GRU baseline, but the proposed model achieves this with fewer candidate cells and substantially smaller candidate area. This indicates a sharper predictive distribution rather than a looser candidate construction.
+Two observations stand out. First, all learned hierarchical models strongly outperform the classical Markov baseline. Second, the proposed multiscale model is not merely more accurate; it is also better calibrated and more spatially efficient than the GRU baseline. Fixed-budget coverage is preserved, while candidate area shrinks substantially. The secondary union diagnostics show that the model achieves this with a sharper predictive distribution rather than a looser candidate construction.
 
 ### 6.2 Improvements over the hierarchical GRU baseline
 
@@ -245,25 +245,25 @@ The gain is consistent across horizons. The 120-minute horizon remains the harde
 
 To isolate the value of explicit multiscale temporal encoding, we compare the final model with a single-scale Transformer horizon decoder that already has horizon-specific queries but no multiscale branch.
 
-| Model | Top1 | Top3 | Top5 | NLL | Brier | ECE | Union Cells | Union Area km² |
+| Model | Top1 | Top3 | Top5 | NLL | Brier | ECE | Cover at Budget | Union Area km^2 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Transformer horizon decoder | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 2.2721 | 122553 |
-| **Proposed multiscale model** | **0.6827** | **0.9174** | **0.9685** | **0.9641** | **0.4338** | **0.0093** | **2.1829** | **118810** |
+| Transformer horizon decoder | 0.6744 | 0.9129 | 0.9656 | 0.9946 | 0.4447 | 0.0123 | 0.9981 | 122553 |
+| **Proposed multiscale model** | **0.6827** | **0.9174** | **0.9685** | **0.9641** | **0.4338** | **0.0093** | **0.9983** | **118810** |
 
-The multiscale branch improves every main macro metric and also reaches a lower validation loss (0.3055 vs. 0.3177). This supports the claim that explicit dual-scale temporal modeling adds value beyond simply replacing the GRU with a Transformer.
+The multiscale branch improves every headline macro metric and also reaches a lower validation loss (0.3055 vs. 0.3177). This supports the claim that explicit dual-scale temporal modeling adds value beyond simply replacing the GRU with a Transformer.
 
 ### 6.4 H3-neighbor refinement is a recall-versus-calibration trade-off
 
 We next evaluate H3-neighbor refinement with three diffusion strengths. The refinement improves probability-mass candidate recall, but it is not a free gain.
 
-| Model | Top5 | NLL | Brier | ECE | Union Cover | Union Cells | Union Area km² |
+| Model | Top5 | NLL | Brier | ECE | Cover at Budget | Union Area km^2 | Union Cover |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Final model | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.8922 | 2.1829 | 118810 |
-| + H3 refine, \(\alpha=0.05\) | 0.9677 | 0.9593 | 0.4344 | 0.0310 | 0.9052 | 2.3315 | 127062 |
-| + H3 refine, \(\alpha=0.10\) | 0.9673 | 0.9796 | 0.4372 | 0.0585 | 0.9192 | 2.5168 | 137220 |
-| + H3 refine, \(\alpha=0.20\) | 0.9662 | 1.0340 | 0.4493 | 0.1135 | 0.9496 | 3.0980 | 167889 |
+| Final model | 0.9685 | 0.9641 | 0.4338 | 0.0093 | 0.9983 | 118810 | 0.8922 |
+| + H3 refine, \(\alpha=0.05\) | 0.9677 | 0.9593 | 0.4344 | 0.0310 | 0.9987 | 127062 | 0.9052 |
+| + H3 refine, \(\alpha=0.10\) | 0.9673 | 0.9796 | 0.4372 | 0.0585 | 0.9987 | 137220 | 0.9192 |
+| + H3 refine, \(\alpha=0.20\) | 0.9662 | 1.0340 | 0.4493 | 0.1135 | 0.9987 | 167889 | 0.9496 |
 
-The refinement increases candidate union cover, but it quickly degrades calibration and eventually worsens top-5 and NLL. Therefore, it should not be presented as the final model. Its value lies in exposing a useful operational trade-off: local spatial smoothing can improve recall, but only by sacrificing confidence quality and spatial compactness.
+The refinement increases the secondary union-cover diagnostic, but it quickly degrades calibration and eventually worsens top-5 and NLL. Therefore, it should not be presented as the final model. Its value lies in exposing a useful operational trade-off: local spatial smoothing can improve recall, but only by sacrificing confidence quality and spatial compactness.
 
 ### 6.5 Reachability filtering has a small aggregate effect
 

@@ -106,6 +106,9 @@ class ModelConfig:
     short_term_branch_horizons: int = 2
     short_term_branch_num_layers: int = 1
     short_term_branch_dropout: float = 0.05
+    short_term_gate_hidden_dim: int = 128
+    short_term_gate_bias: float = -4.0
+    short_term_residual_dropout: float = 0.05
     external_tcn_num_layers: int = 3
     external_tcn_kernel_size: int = 3
     external_tcn_dropout: float = 0.1
@@ -136,6 +139,8 @@ class TrainingConfig:
     horizon_consistency_gap_scaled: bool = True
     auto_resume: bool = False
     resume_from_checkpoint: Optional[str] = None
+    init_from_checkpoint: Optional[str] = None
+    freeze_initialized_parameters: bool = False
     save_last_checkpoint: bool = True
     seed: int = 42
 

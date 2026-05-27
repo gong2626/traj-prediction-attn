@@ -1,12 +1,12 @@
-\begin{tabular}{lcccccccccc}
+\begin{tabular}{lcccccccc}
 \toprule
-Model & Top1 & Top3 & Top5 & NLL & Brier & ECE & Union Cover & Union Cells & Union Area km$^2$ & Cover@Budget \\
+Model & Top1 & Top3 & Top5 & NLL & Brier & ECE & Cover@Budget & Union Area km$^2$ \\
 \midrule
-Markov baseline & 0.3184 & 0.6166 & 0.7587 & 2.2788 & 0.8111 & 0.0323 & 0.8749 & 9.9542 & 545174 & 0.9699 \\
-Hierarchical GRU & 0.6648 & 0.9076 & 0.9631 & 1.0214 & 0.4578 & 0.0180 & 0.8931 & 2.4189 & 128965 & 0.9980 \\
-TrAISformer-H3 & 0.6803 & \textbf{0.9178} & \textbf{0.9697} & \textbf{0.9556} & 0.4361 & 0.0094 & \textbf{0.8939} & 2.2297 & 122810 & \textbf{0.9983} \\
-FlightBERT++-H3 & 0.6764 & 0.9144 & 0.9671 & 0.9791 & 0.4417 & \textbf{0.0086} & 0.8883 & 2.2023 & \textbf{117593} & 0.9982 \\
-Transformer horizon decoder & 0.6744 & 0.9129 & 0.9656 & 0.9946 & 0.4447 & 0.0123 & 0.8920 & 2.2721 & 122553 & 0.9981 \\
-\textbf{Proposed multiscale model} & \textbf{0.6827} & 0.9174 & 0.9685 & 0.9641 & \textbf{0.4338} & 0.0093 & 0.8922 & \textbf{2.1829} & 118810 & 0.9983 \\
+Markov baseline & 0.3184 & 0.6166 & 0.7587 & 2.2788 & 0.8111 & 0.0323 & 0.9699 & 545174 \\
+Hierarchical GRU & 0.6648 & 0.9076 & 0.9631 & 1.0214 & 0.4578 & 0.0180 & 0.9980 & 128965 \\
+TrAISformer-H3 & 0.6803 & \textbf{0.9178} & \textbf{0.9697} & \textbf{0.9556} & 0.4361 & 0.0094 & \textbf{0.9983} & 122810 \\
+FlightBERT++-H3 & 0.6764 & 0.9144 & 0.9671 & 0.9791 & 0.4417 & \textbf{0.0086} & 0.9982 & \textbf{117593} \\
+Transformer horizon decoder & 0.6744 & 0.9129 & 0.9656 & 0.9946 & 0.4447 & 0.0123 & 0.9981 & 122553 \\
+\textbf{Proposed multiscale model} & \textbf{0.6827} & 0.9174 & 0.9685 & 0.9641 & \textbf{0.4338} & 0.0093 & 0.9983 & 118810 \\
 \bottomrule
 \end{tabular}
