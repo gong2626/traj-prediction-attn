@@ -109,6 +109,11 @@ class ModelConfig:
     short_term_gate_hidden_dim: int = 128
     short_term_gate_bias: float = -4.0
     short_term_residual_dropout: float = 0.05
+    router_hidden_dim: int = 128
+    router_dropout: float = 0.05
+    router_init_global_bias: float = 2.0
+    router_init_coarse_bias: float = -1.0
+    router_init_local_bias: float = -1.0
     external_tcn_num_layers: int = 3
     external_tcn_kernel_size: int = 3
     external_tcn_dropout: float = 0.1
@@ -141,6 +146,14 @@ class TrainingConfig:
     resume_from_checkpoint: Optional[str] = None
     init_from_checkpoint: Optional[str] = None
     freeze_initialized_parameters: bool = False
+    teacher_blend_report_path: Optional[str] = None
+    teacher_distillation_weight: float = 0.0
+    teacher_status_distillation_weight: float = 0.0
+    teacher_distillation_interval_steps: int = 1
+    router_supervision_weight: float = 0.0
+    router_supervision_temperature: float = 1.0
+    router_load_balancing_weight: float = 0.0
+    expert_auxiliary_weight: float = 0.0
     save_last_checkpoint: bool = True
     seed: int = 42
 

@@ -33,3 +33,4 @@ docs/slides/.ipynb_checkpoints/
 
 .DS_Store
 Thumbs.db
+.venv-gpu/

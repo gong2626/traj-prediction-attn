@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data._utils.collate import default_collate
@@ -26,6 +27,7 @@ from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
     AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
+    HorizonRouterTransformerH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
     MultiscaleGatedLocalTransformerH3RegionalForecaster,
@@ -356,6 +358,442 @@ def _masked_hierarchical_loss(
     return total_loss
 
 
+def _router_active_expert_mask(model, num_horizons: int, device: torch.device) -> torch.Tensor:
+    active = torch.ones((num_horizons, 3), device=device, dtype=torch.float32)
+    short_term_horizons = int(getattr(model, "short_term_branch_horizons", 0))
+    if short_term_horizons < num_horizons:
+        active[short_term_horizons:, 2] = 0.0
+    return active
+
+
+def _build_router_target_distribution(
+    expert_losses: torch.Tensor,
+    active_mask: torch.Tensor,
+    temperature: float,
+) -> torch.Tensor:
+    safe_temperature = max(float(temperature), 1.0e-6)
+    masked_losses = expert_losses.masked_fill(active_mask <= 0.0, float("inf"))
+    logits = -masked_losses / safe_temperature
+    logits = logits.masked_fill(active_mask <= 0.0, torch.finfo(logits.dtype).min)
+    return torch.softmax(logits, dim=-1)
+
+
+def _router_load_balancing_loss(
+    router_weights: torch.Tensor,
+    label_mask: torch.Tensor,
+    active_mask: torch.Tensor,
+) -> torch.Tensor:
+    if router_weights.numel() == 0:
+        return router_weights.new_zeros(())
+    valid = label_mask.bool()
+    if not torch.any(valid):
+        return router_weights.new_zeros(())
+
+    valid_weights = router_weights[valid]
+    valid_active = active_mask.unsqueeze(0).expand(router_weights.shape[0], -1, -1)[valid]
+    target = valid_active / valid_active.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    diff = valid_weights - target
+    return torch.mean(torch.sum(diff * diff, dim=-1))
+
+
+def _expert_auxiliary_loss(
+    model,
+    outputs: Dict[str, object],
+    coarse_region_labels: torch.Tensor,
+    child_region_labels: torch.Tensor,
+    status_labels: torch.Tensor,
+    label_mask: torch.Tensor,
+    region_criterion: nn.Module,
+    status_criterion: nn.Module,
+    active_mask: torch.Tensor,
+) -> torch.Tensor:
+    if (
+        "coarse_expert_features" not in outputs
+        or "local_expert_features" not in outputs
+        or "global_expert_features" not in outputs
+    ):
+        features: torch.Tensor = outputs["features"]  # type: ignore[assignment]
+        return features.sum() * 0.0
+
+    coarse_expert_features: torch.Tensor = outputs["coarse_expert_features"]  # type: ignore[assignment]
+    local_expert_features: torch.Tensor = outputs["local_expert_features"]  # type: ignore[assignment]
+
+    losses: List[torch.Tensor] = []
+    for horizon_idx, coarse_head in enumerate(model.coarse_heads):
+        valid = label_mask[:, horizon_idx].bool()
+        if not torch.any(valid):
+            continue
+
+        expert_feature_map = {
+            1: coarse_expert_features[:, horizon_idx, :][valid],
+        }
+        if bool(active_mask[horizon_idx, 2].item()):
+            expert_feature_map[2] = local_expert_features[:, horizon_idx, :][valid]
+
+        coarse_target = coarse_region_labels[:, horizon_idx][valid]
+        child_target = child_region_labels[:, horizon_idx][valid]
+        status_target = status_labels[:, horizon_idx][valid]
+        status_head = model.status_heads[horizon_idx]
+
+        for expert_idx, horizon_features in expert_feature_map.items():
+            coarse_logits = coarse_head(horizon_features)
+            losses.append(region_criterion(coarse_logits, coarse_target))
+
+            child_logits = model.child_logits(horizon_features, coarse_target, horizon_idx)
+            valid_child = model.child_target_is_valid(coarse_target, child_target, horizon_idx)
+            if torch.any(valid_child):
+                losses.append(region_criterion(child_logits[valid_child], child_target[valid_child]))
+
+            status_logits_h = status_head(horizon_features)
+            losses.append(status_criterion(status_logits_h, status_target))
+
+    if not losses:
+        return coarse_expert_features.sum() * 0.0
+    return torch.stack(losses).mean()
+
+
+def _temperature_scale_probabilities_tensor(probabilities: torch.Tensor, temperature: float) -> torch.Tensor:
+    safe_temperature = max(float(temperature), 1.0e-6)
+    if abs(safe_temperature - 1.0) < 1.0e-12:
+        return probabilities
+    scaled = torch.pow(probabilities.clamp_min(1.0e-12), 1.0 / safe_temperature)
+    return scaled / scaled.sum(dim=-1, keepdim=True).clamp_min(1.0e-12)
+
+
+def _distillation_kl(student_probs: torch.Tensor, teacher_probs: torch.Tensor) -> torch.Tensor:
+    student_log = torch.log(student_probs.clamp_min(1.0e-12))
+    teacher = teacher_probs.clamp_min(1.0e-12)
+    return torch.sum(teacher * (torch.log(teacher) - student_log), dim=-1).mean()
+
+
+def _build_teacher_targets_for_batch(
+    cfg: ProjectConfig,
+    model,
+    outputs: Dict[str, object],
+    batch: Dict[str, torch.Tensor],
+    coarse_region_labels: torch.Tensor,
+    child_region_labels: torch.Tensor,
+) -> Optional[Dict[str, List[torch.Tensor] | torch.Tensor]]:
+    teacher_report_path = cfg.training.teacher_blend_report_path
+    teacher_weight = float(cfg.training.teacher_distillation_weight)
+    teacher_status_weight = float(cfg.training.teacher_status_distillation_weight)
+    if (
+        teacher_report_path is None
+        or (teacher_weight <= 0.0 and teacher_status_weight <= 0.0)
+    ):
+        return None
+
+    report_path = cfg.resolve_path(teacher_report_path)
+    if report_path is None or not report_path.exists():
+        raise FileNotFoundError(f"Teacher blend report not found: {teacher_report_path}")
+
+    if not hasattr(model, "teacher_blend_runtime"):
+        teacher_payload = json.loads(report_path.read_text(encoding="utf-8"))
+        expert_cfgs: Dict[str, ProjectConfig] = {}
+        for expert_name, config_path in teacher_payload["experts"].items():
+            expert_cfg = load_config(str(cfg.resolve_path(config_path)))
+            expert_cfg.training.device = cfg.training.device
+            expert_cfgs[expert_name] = expert_cfg
+        setattr(
+            model,
+            "teacher_blend_runtime",
+            {
+                "payload": teacher_payload,
+                "expert_cfgs": expert_cfgs,
+                "expert_models": {},
+                "weight_map": {
+                    int(item["horizon_minutes"]): item["weights"]
+                    for item in teacher_payload.get("selected_weights_per_horizon", [])
+                },
+                "temperature_map": {
+                    int(item["horizon_minutes"]): float(item["temperature"])
+                    for item in teacher_payload.get("selected_temperatures_per_horizon", [])
+                },
+            },
+        )
+
+    runtime = getattr(model, "teacher_blend_runtime")
+    expert_models: Dict[str, tuple[str, nn.Module]] = runtime["expert_models"]
+    if not expert_models:
+        train_ds = RegionalForecastDataset(str(cfg.dataset_dir / "train.pt"))
+        for expert_name, expert_cfg in runtime["expert_cfgs"].items():
+            expert_model_type, expert_model = _build_model(expert_cfg, train_ds)
+            checkpoint_run_name = expert_cfg.evaluation.checkpoint_run_name or expert_cfg.output.run_name
+            checkpoint_path = expert_cfg.checkpoint_dir / f"{checkpoint_run_name}.pt"
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            expert_model.load_state_dict(checkpoint["model_state"])
+            expert_model = expert_model.to(batch["region_seq"].device)
+            expert_model.eval()
+            expert_models[expert_name] = (expert_model_type, expert_model)
+
+    with torch.no_grad():
+        expert_outputs: Dict[str, Dict[str, object]] = {}
+        for expert_name, (expert_model_type, expert_model) in expert_models.items():
+            if expert_model_type == "gru":
+                continue
+            expert_outputs[expert_name] = expert_model(
+                batch["region_seq"],
+                batch["parent_region_seq"],
+                batch["numeric_seq"],
+                batch["mask_seq"],
+                batch["context"],
+            )
+
+    teacher_coarse_probs: List[torch.Tensor] = []
+    teacher_child_probs: List[torch.Tensor] = []
+    teacher_status_probs: List[torch.Tensor] = []
+    horizons_minutes = [int(v) for v in cfg.dataset.horizons_minutes]
+    for horizon_idx, horizon_minutes in enumerate(horizons_minutes):
+        weight_map = runtime["weight_map"].get(horizon_minutes, {})
+        temperature = float(runtime["temperature_map"].get(horizon_minutes, 1.0))
+        blended_coarse = None
+        blended_child = None
+        blended_status = None
+        used_weight = 0.0
+        for expert_name, weight in weight_map.items():
+            expert_weight = float(weight)
+            if expert_weight <= 0.0 or expert_name not in expert_outputs or expert_name not in expert_models:
+                continue
+            expert_out = expert_outputs[expert_name]
+            _, expert_model = expert_models[expert_name]
+            expert_features: torch.Tensor = expert_out["features"]  # type: ignore[assignment]
+            expert_decoder_features: torch.Tensor | None = expert_out.get("decoder_features")  # type: ignore[assignment]
+            expert_horizon_features = (
+                expert_decoder_features[:, horizon_idx, :]
+                if expert_decoder_features is not None
+                else expert_features
+            )
+            expert_coarse = torch.softmax(expert_out["coarse_logits"][horizon_idx], dim=-1)  # type: ignore[index]
+            expert_child = torch.softmax(
+                expert_model.child_logits(
+                    expert_horizon_features,
+                    coarse_region_labels[:, horizon_idx],
+                    horizon_idx,
+                ),
+                dim=-1,
+            )
+            expert_status = torch.softmax(expert_out["status_logits"][:, horizon_idx, :], dim=-1)  # type: ignore[index]
+            blended_coarse = (
+                expert_weight * expert_coarse
+                if blended_coarse is None
+                else blended_coarse + expert_weight * expert_coarse
+            )
+            blended_child = (
+                expert_weight * expert_child
+                if blended_child is None
+                else blended_child + expert_weight * expert_child
+            )
+            blended_status = (
+                expert_weight * expert_status
+                if blended_status is None
+                else blended_status + expert_weight * expert_status
+            )
+            used_weight += expert_weight
+
+        if blended_coarse is None or blended_child is None or blended_status is None or used_weight <= 0.0:
+            return None
+        blended_coarse = blended_coarse / used_weight
+        blended_child = blended_child / used_weight
+        blended_status = blended_status / used_weight
+        teacher_coarse_probs.append(_temperature_scale_probabilities_tensor(blended_coarse, temperature))
+        teacher_child_probs.append(_temperature_scale_probabilities_tensor(blended_child, temperature))
+        teacher_status_probs.append(blended_status / blended_status.sum(dim=-1, keepdim=True).clamp_min(1.0e-12))
+
+    return {
+        "coarse_probs": teacher_coarse_probs,
+        "child_probs": teacher_child_probs,
+        "status_probs": torch.stack(teacher_status_probs, dim=1),
+    }
+
+
+def _teacher_distillation_loss(
+    cfg: ProjectConfig,
+    model,
+    outputs: Dict[str, object],
+    batch: Dict[str, torch.Tensor],
+) -> torch.Tensor:
+    teacher_weight = float(cfg.training.teacher_distillation_weight)
+    teacher_status_weight = float(cfg.training.teacher_status_distillation_weight)
+    if teacher_weight <= 0.0 and teacher_status_weight <= 0.0:
+        return batch["region_labels"].new_zeros((), dtype=torch.float32)
+
+    teacher_targets = _build_teacher_targets_for_batch(
+        cfg,
+        model,
+        outputs,
+        batch,
+        batch["coarse_region_labels"],
+        batch["child_region_labels"],
+    )
+    if teacher_targets is None:
+        return batch["region_labels"].new_zeros((), dtype=torch.float32)
+
+    features: torch.Tensor = outputs["features"]  # type: ignore[assignment]
+    decoder_features: torch.Tensor | None = outputs.get("decoder_features")  # type: ignore[assignment]
+    coarse_logits_list: List[torch.Tensor] = outputs["coarse_logits"]  # type: ignore[assignment]
+    status_logits: torch.Tensor = outputs["status_logits"]  # type: ignore[assignment]
+
+    losses: List[torch.Tensor] = []
+    for horizon_idx, student_coarse_logits in enumerate(coarse_logits_list):
+        valid = batch["label_mask"][:, horizon_idx].bool()
+        if not torch.any(valid):
+            continue
+        student_coarse = torch.softmax(student_coarse_logits[valid], dim=-1)
+        losses.append(
+            _distillation_kl(
+                student_coarse,
+                teacher_targets["coarse_probs"][horizon_idx][valid],  # type: ignore[index]
+            )
+        )
+        horizon_features = (
+            decoder_features[:, horizon_idx, :][valid]
+            if decoder_features is not None
+            else features[valid]
+        )
+        coarse_target = batch["coarse_region_labels"][:, horizon_idx][valid]
+        student_child = torch.softmax(model.child_logits(horizon_features, coarse_target, horizon_idx), dim=-1)
+        valid_child = model.child_target_is_valid(
+            coarse_target,
+            batch["child_region_labels"][:, horizon_idx][valid],
+            horizon_idx,
+        )
+        if torch.any(valid_child):
+            losses.append(
+                _distillation_kl(
+                    student_child[valid_child],
+                    teacher_targets["child_probs"][horizon_idx][valid][valid_child],  # type: ignore[index]
+                )
+            )
+
+    total = batch["region_labels"].new_zeros((), dtype=torch.float32)
+    if losses and teacher_weight > 0.0:
+        total = total + torch.stack(losses).mean() * teacher_weight
+    if teacher_status_weight > 0.0:
+        total = total + _distillation_kl(
+            torch.softmax(status_logits, dim=-1),
+            teacher_targets["status_probs"],  # type: ignore[arg-type]
+        ) * teacher_status_weight
+    return total
+
+
+def _should_compute_teacher_distillation(
+    cfg: ProjectConfig,
+    *,
+    is_training: bool,
+    global_step: int,
+) -> bool:
+    if not is_training:
+        return False
+    teacher_weight = float(cfg.training.teacher_distillation_weight)
+    teacher_status_weight = float(cfg.training.teacher_status_distillation_weight)
+    if teacher_weight <= 0.0 and teacher_status_weight <= 0.0:
+        return False
+    interval = max(1, int(cfg.training.teacher_distillation_interval_steps))
+    step_index = max(0, int(global_step) - 1)
+    return (step_index % interval) == 0
+
+
+def _router_regularization_loss(
+    cfg: ProjectConfig,
+    model,
+    outputs: Dict[str, object],
+    batch: Dict[str, torch.Tensor],
+    region_criterion: nn.Module,
+    status_criterion: nn.Module,
+) -> torch.Tensor:
+    router_supervision_weight = float(cfg.training.router_supervision_weight)
+    router_load_balancing_weight = float(cfg.training.router_load_balancing_weight)
+    expert_auxiliary_weight = float(cfg.training.expert_auxiliary_weight)
+    if (
+        router_supervision_weight <= 0.0
+        and router_load_balancing_weight <= 0.0
+        and expert_auxiliary_weight <= 0.0
+    ):
+        return batch["region_labels"].new_zeros((), dtype=torch.float32)
+
+    router_logits: torch.Tensor | None = outputs.get("router_logits")  # type: ignore[assignment]
+    router_weights: torch.Tensor | None = outputs.get("router_weights")  # type: ignore[assignment]
+    global_expert_features: torch.Tensor | None = outputs.get("global_expert_features")  # type: ignore[assignment]
+    coarse_expert_features: torch.Tensor | None = outputs.get("coarse_expert_features")  # type: ignore[assignment]
+    local_expert_features: torch.Tensor | None = outputs.get("local_expert_features")  # type: ignore[assignment]
+    if (
+        router_logits is None
+        or router_weights is None
+        or global_expert_features is None
+        or coarse_expert_features is None
+        or local_expert_features is None
+    ):
+        return batch["region_labels"].new_zeros((), dtype=torch.float32)
+
+    num_horizons = int(router_weights.shape[1])
+    active_mask = _router_active_expert_mask(model, num_horizons, router_weights.device)
+    total = router_weights.new_zeros(())
+
+    if router_supervision_weight > 0.0:
+        expert_loss_rows: List[torch.Tensor] = []
+        for horizon_idx, coarse_head in enumerate(model.coarse_heads):
+            row = router_weights.new_zeros((router_weights.shape[0], 3))
+            valid = batch["label_mask"][:, horizon_idx].bool()
+            if torch.any(valid):
+                coarse_target = batch["coarse_region_labels"][:, horizon_idx][valid]
+                child_target = batch["child_region_labels"][:, horizon_idx][valid]
+                status_target = batch["status_labels"][:, horizon_idx][valid]
+                status_head = model.status_heads[horizon_idx]
+                feature_map = {
+                    0: global_expert_features[:, horizon_idx, :][valid],
+                    1: coarse_expert_features[:, horizon_idx, :][valid],
+                    2: local_expert_features[:, horizon_idx, :][valid],
+                }
+                for expert_idx, horizon_features in feature_map.items():
+                    if not bool(active_mask[horizon_idx, expert_idx].item()):
+                        row[valid, expert_idx] = 1.0e6
+                        continue
+                    coarse_logits = coarse_head(horizon_features)
+                    child_logits = model.child_logits(horizon_features, coarse_target, horizon_idx)
+                    status_logits_h = status_head(horizon_features)
+                    valid_child = model.child_target_is_valid(coarse_target, child_target, horizon_idx)
+                    expert_loss = region_criterion(coarse_logits, coarse_target)
+                    if torch.any(valid_child):
+                        expert_loss = expert_loss + region_criterion(child_logits[valid_child], child_target[valid_child])
+                    expert_loss = expert_loss + status_criterion(status_logits_h, status_target)
+                    row[valid, expert_idx] = expert_loss.detach()
+            expert_loss_rows.append(row)
+
+        full_active_mask = active_mask.unsqueeze(0).expand(router_weights.shape[0], -1, -1)
+        router_target = _build_router_target_distribution(
+            expert_losses=torch.stack(expert_loss_rows, dim=1).reshape(-1, 3),
+            active_mask=full_active_mask.reshape(-1, 3),
+            temperature=float(cfg.training.router_supervision_temperature),
+        ).reshape_as(router_weights)
+        valid = batch["label_mask"].reshape(-1)
+        if torch.any(valid):
+            student_log = torch.log(router_weights.reshape(-1, 3)[valid].clamp_min(1.0e-12))
+            teacher_probs = router_target.reshape(-1, 3)[valid]
+            total = total + F.kl_div(student_log, teacher_probs, reduction="batchmean") * router_supervision_weight
+
+    if router_load_balancing_weight > 0.0:
+        total = total + _router_load_balancing_loss(
+            router_weights=router_weights,
+            label_mask=batch["label_mask"],
+            active_mask=active_mask,
+        ) * router_load_balancing_weight
+
+    if expert_auxiliary_weight > 0.0:
+        total = total + _expert_auxiliary_loss(
+            model=model,
+            outputs=outputs,
+            coarse_region_labels=batch["coarse_region_labels"],
+            child_region_labels=batch["child_region_labels"],
+            status_labels=batch["status_labels"],
+            label_mask=batch["label_mask"],
+            region_criterion=region_criterion,
+            status_criterion=status_criterion,
+            active_mask=active_mask,
+        ) * expert_auxiliary_weight
+
+    return total
+
+
 def _horizon_consistency_loss(
     decoder_features: Optional[torch.Tensor],
     label_mask: torch.Tensor,
@@ -498,6 +936,20 @@ def _build_model(cfg: ProjectConfig, train_ds: RegionalForecastDataset):
             max_history_steps=int(train_ds.metadata["history_steps"]),
             config=cfg.model,
         )
+    if model_type == "horizon_router_transformer_h3":
+        return model_type, HorizonRouterTransformerH3RegionalForecaster(
+            input_num_region_classes=train_ds.metadata["input_num_region_classes"],
+            input_parent_num_region_classes=train_ds.metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=train_ds.metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(train_ds.metadata),
+            max_children_per_horizon=train_ds.metadata["max_children_per_horizon"],
+            num_status_classes=train_ds.metadata["num_status_classes"],
+            num_numeric_features=train_ds.metadata["num_numeric_features"],
+            num_mask_features=train_ds.metadata["num_mask_features"],
+            num_context_features=train_ds.metadata["num_context_features"],
+            max_history_steps=int(train_ds.metadata["history_steps"]),
+            config=cfg.model,
+        )
     if model_type == "attention_tcn_gru_h3":
         return model_type, AttentionTCNGRUHierarchicalH3RegionalForecaster(
             input_num_region_classes=train_ds.metadata["input_num_region_classes"],
@@ -549,6 +1001,9 @@ def _compute_loss_for_batch(
     batch: Dict[str, torch.Tensor],
     region_criterion: nn.Module,
     status_criterion: nn.Module,
+    *,
+    is_training: bool,
+    global_step: int,
 ):
     if model_type == "gru":
         outputs = model(
@@ -586,6 +1041,22 @@ def _compute_loss_for_batch(
         horizon_consistency_weight=cfg.training.horizon_consistency_weight,
         horizon_consistency_gap_scaled=cfg.training.horizon_consistency_gap_scaled,
     )
+    if is_training:
+        if _should_compute_teacher_distillation(cfg, is_training=is_training, global_step=global_step):
+            loss = loss + _teacher_distillation_loss(
+                cfg=cfg,
+                model=model,
+                outputs=outputs,
+                batch=batch,
+            )
+        loss = loss + _router_regularization_loss(
+            cfg=cfg,
+            model=model,
+            outputs=outputs,
+            batch=batch,
+            region_criterion=region_criterion,
+            status_criterion=status_criterion,
+        )
     return outputs, loss
 
 
@@ -747,6 +1218,7 @@ def run_training(
 
     completed_epoch = start_epoch - 1
     last_checkpoint_path = _last_checkpoint_path(checkpoint_path)
+    global_step = 0
     for epoch in range(start_epoch, cfg.training.epochs + 1):
         model.train()
         train_loss_total: Optional[torch.Tensor] = None
@@ -755,6 +1227,7 @@ def run_training(
         for raw_batch in train_loader:
             batch = _move_batch(raw_batch, device)
             optimizer.zero_grad(set_to_none=True)
+            global_step += 1
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 _, loss = _compute_loss_for_batch(
@@ -764,6 +1237,8 @@ def run_training(
                     batch=batch,
                     region_criterion=region_criterion,
                     status_criterion=status_criterion,
+                    is_training=True,
+                    global_step=global_step,
                 )
 
             if not torch.isfinite(loss):
@@ -795,6 +1270,8 @@ def run_training(
                         batch=batch,
                         region_criterion=region_criterion,
                         status_criterion=status_criterion,
+                        is_training=False,
+                        global_step=global_step,
                     )
 
                 if not torch.isfinite(loss):

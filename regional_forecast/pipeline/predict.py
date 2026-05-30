@@ -26,6 +26,7 @@ from regional_forecast.models.baseline import RegionalMarkovBaseline
 from regional_forecast.models.forecast_model import (
     AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
+    HorizonRouterTransformerH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
     MultiscaleGatedLocalTransformerH3RegionalForecaster,
@@ -197,6 +198,20 @@ def _load_model_bundle(
         )
     elif model_type == "multiscale_transformer_h3_gated_local":
         model = MultiscaleGatedLocalTransformerH3RegionalForecaster(
+            input_num_region_classes=metadata["input_num_region_classes"],
+            input_parent_num_region_classes=metadata["input_parent_num_region_classes"],
+            num_coarse_region_classes_per_horizon=metadata["num_coarse_region_classes_per_horizon"],
+            child_count_by_coarse_per_horizon=_child_count_by_coarse_per_horizon(metadata),
+            max_children_per_horizon=metadata["max_children_per_horizon"],
+            num_status_classes=metadata["num_status_classes"],
+            num_numeric_features=metadata["num_numeric_features"],
+            num_mask_features=metadata["num_mask_features"],
+            num_context_features=metadata["num_context_features"],
+            max_history_steps=int(metadata["history_steps"]),
+            config=train_cfg.model,
+        )
+    elif model_type == "horizon_router_transformer_h3":
+        model = HorizonRouterTransformerH3RegionalForecaster(
             input_num_region_classes=metadata["input_num_region_classes"],
             input_parent_num_region_classes=metadata["input_parent_num_region_classes"],
             num_coarse_region_classes_per_horizon=metadata["num_coarse_region_classes_per_horizon"],

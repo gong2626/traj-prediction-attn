@@ -1348,3 +1348,285 @@ class MultiscaleGatedLocalTransformerH3RegionalForecaster(MultiscaleTransformerH
             "local_attention_weights": local_attention_weights,
             "local_gate_values": local_gate_values,
         }
+
+
+class HorizonRouterTransformerH3RegionalForecaster(MultiscaleTransformerH3RegionalForecaster):
+    def __init__(
+        self,
+        input_num_region_classes: int,
+        input_parent_num_region_classes: int,
+        num_coarse_region_classes_per_horizon: list[int],
+        child_count_by_coarse_per_horizon: list[list[int]],
+        max_children_per_horizon: list[int],
+        num_status_classes: int,
+        num_numeric_features: int,
+        num_mask_features: int,
+        num_context_features: int,
+        max_history_steps: int,
+        config: ModelConfig,
+    ):
+        super().__init__(
+            input_num_region_classes=input_num_region_classes,
+            input_parent_num_region_classes=input_parent_num_region_classes,
+            num_coarse_region_classes_per_horizon=num_coarse_region_classes_per_horizon,
+            child_count_by_coarse_per_horizon=child_count_by_coarse_per_horizon,
+            max_children_per_horizon=max_children_per_horizon,
+            num_status_classes=num_status_classes,
+            num_numeric_features=num_numeric_features,
+            num_mask_features=num_mask_features,
+            num_context_features=num_context_features,
+            max_history_steps=max_history_steps,
+            config=config,
+        )
+        self.short_term_branch_steps = max(0, int(config.short_term_branch_steps))
+        self.short_term_branch_horizons = max(
+            0,
+            min(self.num_horizons, int(config.short_term_branch_horizons)),
+        )
+        local_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=config.hidden_dim,
+            nhead=config.transformer_num_heads,
+            dim_feedforward=config.transformer_ffn_dim,
+            dropout=config.short_term_branch_dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=False,
+        )
+        self.local_causal_encoder = nn.TransformerEncoder(
+            local_encoder_layer,
+            num_layers=max(1, int(config.short_term_branch_num_layers)),
+            enable_nested_tensor=False,
+        )
+        self.coarse_expert_projection = nn.Sequential(
+            nn.Linear(
+                self.feature_dim + config.hidden_dim + config.horizon_embedding_dim,
+                self.feature_dim,
+            ),
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+        )
+        self.local_expert_projection = nn.Sequential(
+            nn.Linear(
+                self.feature_dim + config.hidden_dim + config.horizon_embedding_dim,
+                self.feature_dim,
+            ),
+            nn.ReLU(),
+            nn.Dropout(config.dropout),
+        )
+        router_hidden_dim = max(16, int(config.router_hidden_dim))
+        self.router_projection = nn.Sequential(
+            nn.Linear(self.feature_dim * 3 + config.horizon_embedding_dim, router_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(float(config.router_dropout)),
+            nn.Linear(router_hidden_dim, 3),
+        )
+        with torch.no_grad():
+            nn.init.zeros_(self.router_projection[-1].weight)
+            self.router_projection[-1].bias.copy_(
+                torch.tensor(
+                    [
+                        float(config.router_init_global_bias),
+                        float(config.router_init_coarse_bias),
+                        float(config.router_init_local_bias),
+                    ],
+                    dtype=self.router_projection[-1].bias.dtype,
+                )
+            )
+
+    def _causal_mask(self, seq_len: int, device: torch.device) -> torch.Tensor:
+        return torch.triu(
+            torch.ones(seq_len, seq_len, device=device, dtype=torch.bool),
+            diagonal=1,
+        )
+
+    def encode(
+        self,
+        region_seq: torch.Tensor,
+        parent_region_seq: torch.Tensor,
+        numeric_seq: torch.Tensor,
+        mask_seq: torch.Tensor,
+        context: torch.Tensor,
+        retrieved_features: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        region_features = self.region_embedding(region_seq)
+        parent_region_features = self.parent_region_embedding(parent_region_seq)
+        numeric_features = self.numeric_projection(numeric_seq)
+        mask_features = self.mask_projection(mask_seq)
+        encoded_input = torch.cat(
+            [region_features, parent_region_features, numeric_features, mask_features],
+            dim=-1,
+        )
+
+        seq_len = int(encoded_input.shape[1])
+        if seq_len > self.max_history_steps:
+            raise ValueError(
+                f"Sequence length {seq_len} exceeds max_history_steps={self.max_history_steps}."
+            )
+
+        temporal_mask = self._temporal_mask(region_seq, mask_seq)
+        position_ids = torch.arange(seq_len, device=encoded_input.device, dtype=torch.long)
+        position_features = self.position_embedding(position_ids).unsqueeze(0)
+        transformer_input = self.sequence_input_projection(encoded_input) + position_features
+        transformer_input = self.sequence_dropout(self.sequence_layer_norm(transformer_input))
+        fine_sequence = self.encoder(
+            transformer_input,
+            src_key_padding_mask=~temporal_mask,
+        )
+        coarse_input, coarse_mask = self._pool_multiscale(fine_sequence, temporal_mask)
+        coarse_sequence = self.coarse_encoder(
+            coarse_input,
+            src_key_padding_mask=~coarse_mask,
+        )
+
+        summary = self._masked_mean_pool(fine_sequence, temporal_mask)
+        context_features = self.context_projection(context)
+        base_features = torch.cat([summary, context_features], dim=-1)
+
+        if retrieved_features is not None:
+            base_features = base_features + retrieved_features
+
+        base_features = self.dropout(base_features)
+        horizon_ids = torch.arange(self.num_horizons, device=base_features.device, dtype=torch.long)
+        horizon_embeds = self.horizon_embedding(horizon_ids).unsqueeze(0).expand(base_features.shape[0], -1, -1)
+        query_input = torch.cat(
+            [base_features.unsqueeze(1).expand(-1, self.num_horizons, -1), horizon_embeds],
+            dim=-1,
+        )
+        queries = self.horizon_query_projection(query_input)
+
+        fine_logits = torch.einsum("bhd,bsd->bhs", queries, fine_sequence)
+        fine_logits = fine_logits.masked_fill(~temporal_mask.unsqueeze(1), torch.finfo(fine_logits.dtype).min)
+        fine_weights = torch.softmax(fine_logits, dim=-1)
+        fine_attended = torch.einsum("bhs,bsd->bhd", fine_weights, fine_sequence)
+
+        coarse_logits = torch.einsum("bhd,btd->bht", queries, coarse_sequence)
+        coarse_logits = coarse_logits.masked_fill(~coarse_mask.unsqueeze(1), torch.finfo(coarse_logits.dtype).min)
+        coarse_weights = torch.softmax(coarse_logits, dim=-1)
+        coarse_attended = torch.einsum("bht,btd->bhd", coarse_weights, coarse_sequence)
+
+        global_input = torch.cat(
+            [
+                base_features.unsqueeze(1).expand(-1, self.num_horizons, -1),
+                fine_attended,
+                coarse_attended,
+                horizon_embeds,
+            ],
+            dim=-1,
+        )
+        # Reuse the tuned multiscale decoder projection as the default global expert
+        # so warm-start starts from the strongest existing single-model path.
+        global_expert = self.scale_feature_projection(global_input)
+
+        coarse_summary = self._masked_mean_pool(coarse_sequence, coarse_mask)
+        coarse_base = torch.cat([coarse_summary, context_features], dim=-1)
+        if retrieved_features is not None:
+            coarse_base = coarse_base + retrieved_features
+        coarse_base = self.dropout(coarse_base)
+        coarse_expert_input = torch.cat(
+            [
+                coarse_base.unsqueeze(1).expand(-1, self.num_horizons, -1),
+                coarse_attended,
+                horizon_embeds,
+            ],
+            dim=-1,
+        )
+        coarse_expert = self.coarse_expert_projection(coarse_expert_input)
+
+        local_expert = global_expert.new_zeros(global_expert.shape)
+        local_attention_weights = global_expert.new_zeros((global_expert.shape[0], self.num_horizons, 0))
+        if self.short_term_branch_steps > 0 and self.short_term_branch_horizons > 0:
+            local_seq_len = min(seq_len, self.short_term_branch_steps)
+            local_start = seq_len - local_seq_len
+            local_input = fine_sequence[:, local_start:, :]
+            local_mask = temporal_mask[:, local_start:]
+            local_sequence = self.local_causal_encoder(
+                local_input,
+                mask=self._causal_mask(local_seq_len, local_input.device),
+                src_key_padding_mask=~local_mask,
+            )
+            local_queries = queries[:, :self.short_term_branch_horizons, :]
+            local_logits = torch.einsum("bhd,bsd->bhs", local_queries, local_sequence)
+            local_logits = local_logits.masked_fill(~local_mask.unsqueeze(1), torch.finfo(local_logits.dtype).min)
+            local_weights = torch.softmax(local_logits, dim=-1)
+            local_attended = torch.einsum("bhs,bsd->bhd", local_weights, local_sequence)
+            local_input_features = torch.cat(
+                [
+                    base_features.unsqueeze(1).expand(-1, self.short_term_branch_horizons, -1),
+                    local_attended,
+                    horizon_embeds[:, :self.short_term_branch_horizons, :],
+                ],
+                dim=-1,
+            )
+            local_expert[:, :self.short_term_branch_horizons, :] = self.local_expert_projection(local_input_features)
+            local_attention_weights = global_expert.new_zeros(
+                (global_expert.shape[0], self.num_horizons, local_seq_len)
+            )
+            local_attention_weights[:, :self.short_term_branch_horizons, :] = local_weights
+
+        router_input = torch.cat(
+            [
+                global_expert,
+                coarse_expert,
+                local_expert,
+                horizon_embeds,
+            ],
+            dim=-1,
+        )
+        router_logits = self.router_projection(router_input)
+        router_weights = torch.softmax(router_logits, dim=-1)
+        expert_stack = torch.stack([global_expert, coarse_expert, local_expert], dim=2)
+        decoder_features = torch.sum(router_weights.unsqueeze(-1) * expert_stack, dim=2)
+
+        return {
+            "features": base_features,
+            "decoder_features": decoder_features,
+            "attention_weights": fine_weights,
+            "coarse_attention_weights": coarse_weights,
+            "local_attention_weights": local_attention_weights,
+            "router_logits": router_logits,
+            "router_weights": router_weights,
+            "global_expert_features": global_expert,
+            "coarse_expert_features": coarse_expert,
+            "local_expert_features": local_expert,
+        }
+
+    def forward(
+        self,
+        region_seq: torch.Tensor,
+        parent_region_seq: torch.Tensor,
+        numeric_seq: torch.Tensor,
+        mask_seq: torch.Tensor,
+        context: torch.Tensor,
+        retrieved_features: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor | list[torch.Tensor]]:
+        encoded = self.encode(
+            region_seq=region_seq,
+            parent_region_seq=parent_region_seq,
+            numeric_seq=numeric_seq,
+            mask_seq=mask_seq,
+            context=context,
+            retrieved_features=retrieved_features,
+        )
+        decoder_features: torch.Tensor = encoded["decoder_features"]
+        coarse_logits = [
+            head(decoder_features[:, horizon_idx, :])
+            for horizon_idx, head in enumerate(self.coarse_heads)
+        ]
+        status_logits = [
+            head(decoder_features[:, horizon_idx, :])
+            for horizon_idx, head in enumerate(self.status_heads)
+        ]
+        return {
+            "features": encoded["features"],
+            "decoder_features": decoder_features,
+            "attention_weights": encoded["attention_weights"],
+            "coarse_attention_weights": encoded["coarse_attention_weights"],
+            "local_attention_weights": encoded["local_attention_weights"],
+            "router_logits": encoded["router_logits"],
+            "router_weights": encoded["router_weights"],
+            "global_expert_features": encoded["global_expert_features"],
+            "coarse_expert_features": encoded["coarse_expert_features"],
+            "local_expert_features": encoded["local_expert_features"],
+            "coarse_logits": coarse_logits,
+            "status_logits": torch.stack(status_logits, dim=1),
+        }

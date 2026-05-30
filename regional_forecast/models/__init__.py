@@ -7,6 +7,7 @@ from regional_forecast.external_baselines import (
 from regional_forecast.models.forecast_model import (
     AttentionHierarchicalH3RegionalForecaster,
     HierarchicalH3RegionalForecaster,
+    HorizonRouterTransformerH3RegionalForecaster,
     HorizonDecoderHierarchicalH3RegionalForecaster,
     LongHorizonRegionalForecaster,
     MultiscaleGatedLocalTransformerH3RegionalForecaster,
@@ -20,6 +21,7 @@ __all__ = [
     "LongHorizonRegionalForecaster",
     "HierarchicalH3RegionalForecaster",
     "AttentionHierarchicalH3RegionalForecaster",
+    "HorizonRouterTransformerH3RegionalForecaster",
     "HorizonDecoderHierarchicalH3RegionalForecaster",
     "MultiscaleGatedLocalTransformerH3RegionalForecaster",
     "MultiscaleLocalCausalTransformerH3RegionalForecaster",

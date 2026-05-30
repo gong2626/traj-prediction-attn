@@ -49,6 +49,7 @@ HIERARCHICAL_MODEL_TYPES = {
     "multiscale_transformer_h3",
     "multiscale_transformer_h3_local_causal",
     "multiscale_transformer_h3_gated_local",
+    "horizon_router_transformer_h3",
     "attention_tcn_gru_h3",
     "traisformer_h3",
     "flightbertpp_h3",
