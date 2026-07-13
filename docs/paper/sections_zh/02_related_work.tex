@@ -1,23 +1,33 @@
 \section{相关工作}
 
-\subsection{航空轨迹点预测与多时域航空预测}
+\subsection{航空轨迹预测与未来空域需求感知}
 
-航空轨迹预测的主流文献长期围绕连续点位或四维轨迹回归展开。Attention-LSTM 模型将注意力机制引入四维轨迹预测，以改善对历史关键状态的利用~\cite{jia2022attentionlstm}；Attention-TCN-GRU 模型则结合时序卷积、循环单元和注意力模块进行数据驱动的四维轨迹预测~\cite{ma2024attentiontcngru}。这类方法说明，历史片段中的不同时间步对未来轨迹并非同等重要。除循环网络外，近期航空文献也开始引入更强的时频与 Transformer 结构。例如，WTFTP 利用时频小波表示建模轨迹中的全局与局部模式~\cite{zhang2023wtftp}，其后续工作 WTFTP+ 进一步将问题扩展到直接多时域预测~\cite{guo2026wtftpplus}；FlightBERT++ 则明确采用非自回归广义 encoder-decoder 框架，配合 horizon-aware context generator 与 differential-prompted decoder，直接输出多个预测提前量上的飞行状态~\cite{guo_flightbertpp_2024}。与此同时，也有研究开始面向更复杂的数据条件，处理噪声 ADS-B 观测或稀疏卫星观测场景~\cite{li2025noiserobust,shan2025sparse}。
+航空轨迹预测长期服务于运行态势、需求--容量平衡和交通流量管理。TBO 将轨迹作为跨系统协同的核心对象，日运行阶段的轨迹集合则刻画未来空域需求，并支撑 traffic management actions、约束点调度和容量管理~\cite{faa_tbo_2026,icao_ganp_2026}。在这一背景下，预测误差不是孤立的模型误差。Reisman 等分析了战术轨迹精度对 TFM 操作的影响~\cite{reisman2007trajectory_accuracy_tfm}，Mercer 等研究了轨迹预测不确定性对管制员表现和工具可接受性的影响~\cite{mercer2013trajectory_uncertainty}。围绕更高层的流量管理，Chen 等使用机会约束优化处理不确定性下的 ATFM 问题~\cite{chen2017atfm_uncertainty}，Tobaruela 等提出 air traffic predictability framework 以分析交通可预测性及其应用~\cite{tobaruela2014predictability}。近期不利天气下的空中交通拥堵预测也说明，未来空域需求判断需要显式处理运行不确定性~\cite{nunezportillo2024congestion_weather}。
 
-这些工作共同推动了航空轨迹预测从单步外推走向更复杂的序列建模，但它们绝大多数仍以连续坐标误差为主要目标。相比之下，本文关注的是开放运行档案上的长时域区域概率预测：输出空间从连续点轨迹转为层级 H3 区域分布，评价目标也从点误差扩展到概率质量和候选区域效率。
+本文与上述 ATM 工作的连接点在于概率化的未来区域占用，而不是直接求解 ATFM 优化。本文学习单架航空器在多个提前量上的区域概率分布；这些分布可以进一步聚合为空域需求图，也可以用于区域排序和热点识别。因此，本文把运行需求中的“不确定未来占用”转化为可训练、可比较的层级区域概率预测问题。
 
-\subsection{多时域预测与 horizon-aware 解码}
+\subsection{数据驱动航空轨迹预测与多时域建模}
 
-从更一般的序列预测文献来看，多时域预测的核心难点并不只是“预测得更远”，而在于不同 horizon 往往依赖历史中的不同信息。Temporal Fusion Transformer 将局部时序处理、门控结构与注意力机制结合，用于可解释的多时域预测~\cite{lim2021tft}。MQTransformer 则更直接地指出，若所有预测时域都共享同一个压缩上下文，模型容易受到信息瓶颈影响；为此，该工作引入依赖上下文的 decoder-encoder attention，使不同 horizon 可以读取不同的历史表示~\cite{mqtransformer2020}。在离散轨迹建模方向，TrAISformer 将离散空间表示与 Transformer 结合，用于 AIS 航迹预测，说明基于离散空间支撑的序列建模可以成为坐标回归之外的另一条路线~\cite{nguyen_traisformer_2021}。
+数据驱动航空轨迹预测从物理外推和统计模型逐步转向深度时序表示学习。已有综述将民航四维轨迹预测方法按物理模型、统计模型和深度学习模型归类，并指出数据质量、泛化能力和不确定性量化仍是主要挑战~\cite{zeng2022trajectory_review,kwak2025trajectory_review}。在深度模型中，Attention-LSTM 将注意力机制用于四维轨迹预测~\cite{jia2022attentionlstm}，Attention-TCN-GRU 结合时序卷积、GRU 和注意力模块建模航空器状态演化~\cite{ma2024attentiontcngru}。WTFTP 通过时频小波变换刻画轨迹中的全局与局部模式~\cite{zhang2023wtftp}，WTFTP+ 将这一思路扩展到多时域飞行轨迹预测~\cite{guo2026wtftpplus}。FlightBERT++ 采用非自回归多时域框架，通过 horizon-aware context generator 和 differential-prompted decoder 直接预测多个提前量上的飞行状态~\cite{guo_flightbertpp_2024}。
 
-本文的时间结构设计直接受到这类工作启发。我们并不让全部预测时域共享单个历史摘要向量，而是为每个 horizon 分配独立的可学习 query，让模型从历史编码状态中提取与该时域最相关的信息。与通用时间序列预测器不同的是，本文把这种 horizon-aware 解码嵌入到了层级 H3 航空区域预测框架中，并与 coarse-to-fine 输出头保持兼容。
+另一些工作关注观测条件本身。Li 等面向噪声 ADS-B 数据提出自回归 Transformer 与混合位置编码~\cite{li2025noiserobust}，Shan 等研究稀疏卫星观测下的航空轨迹预测框架~\cite{shan2025sparse}。这些研究共同表明，航空预测中的时间表示、观测质量和多时域输出需要被同时考虑。本文沿用多时域建模的基本问题意识，但将输出从连续坐标序列改为层级 H3 区域概率，从而把评价重点扩展到似然质量和概率校准。
 
-\subsection{概率预测、校准与候选区域评估}
+\subsection{开放监视数据、运行语义与区域化建模}
 
-一旦输出从“单点轨迹”转向“区域概率分布”，评价问题就不再只是命中率问题。Gneiting 和 Raftery 系统讨论了严格适定评分规则，指出概率预测不仅需要高分辨率，还需要在校准约束下保持足够尖锐~\cite{gneiting2007strictlyproper}。Brier 分数作为概率预测中的经典二次评分规则，长期被用于衡量类别事件预测的整体质量~\cite{brier1950verification}。在深度学习背景下，Guo 等人进一步表明，即使现代神经网络在准确率上表现良好，也可能存在明显误校准~\cite{guo2017calibration}。
+开放飞行数据基础设施为大规模可复现研究提供了条件。OpenSky Network 是面向研究的大规模 ADS-B 传感网络~\cite{opensky2014}，其 2019--2020 数据集覆盖大范围历史航班数据，并被用于多类航空运行研究~\cite{strohmeier2021crowdsourced}。OpenSky 相关研究还讨论了众包空中交通数据的研究使用和社会影响~\cite{strohmeier2020research_usage}。在流量管理系统中，运行数据质量本身也会影响 TFM 决策分析~\cite{chatterji2003etms_quality}。ADRR 则提供面向研究和开发的商业航班运行档案，包含结构化轨迹与运行信息~\cite{eurocontrol_adrr_2025}。
 
-这类结论对于航空区域预测尤其重要。一个模型可以通过把概率质量摊到更大的空间支持上来提高 top-k 或候选召回，但这并不意味着它给出的概率是可信的，也不意味着候选区域在运行上可用。因此，本文除了报告 top-k 区域命中率外，还同时报告 NLL、Brier 分数和 ECE，并显式衡量候选覆盖率、候选 cell 数量和候选面积。这样的评估方式有助于区分“真正学到了更好的概率分布”与“仅仅扩大了候选区域”这两类模型。
+监视数据建模也常与意图推断、计划提取和一致性监测相连。Krozel 研究了 free flight aircraft 的 intent inference~\cite{krozel2000intent_inference}，Foo 等将 intent inference 用于 surveillance 和 conformance monitoring~\cite{foo2007intent_conformance}，Yang 等基于在线轨迹聚类进行终端区航空器意图推断~\cite{yang2015terminal_intent}。Lee 和 Lee 从记录的 ADS-B 轨迹中提取 flight plans，说明历史轨迹可以恢复更高层的运行结构~\cite{lee2022extracting_flight_plans}。本文没有把预测目标写成计划恢复或语义解释，而是把监视轨迹转化为未来区域概率分布；这种表述更贴近下游区域占用、计划一致性和异常监测所需的空间输入。
 
-\subsection{开放飞行数据、离散空间建模与层级网格}
+\subsection{层级空间表示、离散轨迹建模与多尺度时间编码}
 
-本文的问题设定还受到开放飞行数据基础设施和离散空间表示方法的共同影响。OpenSky 的原始传感网络与后续开放数据发布，使得面向真实运行流量的大规模研究成为可能~\cite{opensky2014,strohmeier2021crowdsourced}；ADRR 则提供了更适合研究与开发的结构化飞行档案~\cite{eurocontrol_adrr_2025}。在空间表示方面，离散全球网格系统为多分辨率区域推理提供了统一支撑~\cite{sahr2003gdggs}，而 H3 进一步给出了工程上成熟的层级六边形索引和邻域操作接口~\cite{h3docs2025}。本文正是在这一背景下，把多时域航空预测从连续坐标回归改写为层级 H3 概率区域预测，并将区域概率、层级解码和候选区域评估纳入同一实验协议中。
+区域化输出需要合适的空间离散化。离散全球网格系统为大范围、多分辨率空间表示提供了通用框架~\cite{sahr2003gdggs}，H3 则提供层级六边形索引、父子映射和邻域操作接口~\cite{h3docs2025}。在轨迹建模中，离散 token 表示也已被用于非航空场景；例如 TrAISformer 将 AIS 船舶轨迹离散化为 token，并使用 Transformer 学习序列分布~\cite{nguyen_traisformer_2021}。本文将 H3 层级网格用于航空区域预测：历史轨迹以 H3 token 和父层 token 输入，输出端以父区域和条件子区域分布表达不同 horizon 的空间不确定性。
+
+多时域预测还要求模型按提前量读取不同历史证据。Temporal Fusion Transformer 将局部序列处理、门控机制和注意力结合，用于可解释多时域时间序列预测~\cite{lim2021tft}。MQTransformer 进一步提出 context-dependent decoder-encoder attention，避免所有 horizon 共享同一压缩上下文~\cite{mqtransformer2020}。这些工作说明，多时域预测不应只依赖单个共享摘要。本文的多尺度 horizon-query 编码器沿着这一方向前进：每个 horizon query 同时访问细尺度历史序列和粗尺度池化序列，使短时和长时预测可以使用不同粒度的时间证据。
+
+\subsection{概率校准、专家路由与蒸馏训练}
+
+区域概率预测需要比 top-k 命中率更完整的评价。Gneiting 和 Raftery 系统讨论了严格适定评分规则，强调概率预测需要同时考虑校准性和尖锐性~\cite{gneiting2007strictlyproper}。Brier 分数是概率事件预测中的经典二次评分规则~\cite{brier1950verification}。在深度学习模型中，Guo 等指出高准确率神经网络仍可能存在明显误校准~\cite{guo2017calibration}。这些结论直接影响本文的评价协议：区域预测模型不能只用 top-$k$ 命中率排序，还应同时报告 NLL、Brier 和 ECE，以区分“命中更多目标”和“给出更可信概率分布”。
+
+本文方法还与 mixture-of-experts 和 routing 文献相关。Jacobs 等提出 adaptive mixtures of local experts，用门控网络组合多个局部专家~\cite{Jacobs_1991}；Shazeer 等将 sparsely-gated MoE 引入大规模神经网络~\cite{shazeer2017outrageouslylargeneuralnetworks}；Switch Transformer 进一步展示了稀疏专家路由在大模型训练中的可扩展性~\cite{JMLR:v23:21-0998}。这些工作关注通用路由机制，本文则把路由粒度落到预测 horizon：global、coarse-stable 和 local-causal 三个 expert 分别覆盖完整历史多尺度趋势、粗尺度稳定演化和短时局部机动。
+
+路由模型的训练也与知识蒸馏和模型压缩相关。Bucila 等提出通过压缩模型逼近大模型或集成的预测行为~\cite{bucila2006model_compression}，Hinton 等系统化了用 softened targets 蒸馏神经网络知识的做法~\cite{hinton2015distilling}，Born Again Neural Networks 进一步显示同结构教师也可以改进学生模型~\cite{furlanello2018born_again}。本文借鉴的是这种“用教师概率分布稳定学生训练”的思想，但把蒸馏目标放在层级 H3 粗区域、条件子区域和状态输出上，并与基于 expert loss 的 router supervision、active expert mask 和负载均衡共同使用。

@@ -1,21 +1,20 @@
 \section{引言}
 
-开放飞行监视网络和研究档案正在持续改变航空数据分析的研究条件。OpenSky Network 证明了众包 ADS-B 传感网络可以长期支撑大规模可复现研究~\cite{opensky2014}，后续发布的 OpenSky 2019--2020 数据集又进一步说明，开放飞行数据已经能够覆盖大范围、长时间跨度的民航运行~\cite{strohmeier2021crowdsourced}。EUROCONTROL 的 Aviation Data Repository for Research（ADRR）则向研究和开发提供了更结构化的商业航班轨迹与运行信息档案~\cite{eurocontrol_adrr_2025}。在这样的数据条件下，航空轨迹预测不再只能围绕少量航班、单一机场或封闭基准展开，而可以被重新表述为一个面向开放数据、长时域和可复现实验的问题。
+未来空域需求感知是轨迹化运行和空中交通流量管理中的基础环节。Trajectory Based Operations（TBO）把航空器轨迹作为跨系统共享的运行对象；在日运行阶段，一组航班在未来若干提前量上的位置分布刻画了空域需求，并影响流量管理措施、约束点调度和需求--容量平衡~\cite{faa_tbo_2026,icao_ganp_2026}。已有 ATM 研究也表明，轨迹预测误差和不确定性会传递到 Traffic Flow Management 操作、管制自动化工具和不利天气下的拥堵预测中~\cite{reisman2007trajectory_accuracy_tfm,mercer2013trajectory_uncertainty,chen2017atfm_uncertainty,nunezportillo2024congestion_weather}。因此，长时航空预测不只需要回答“最可能在哪里”，还需要回答“哪些区域可能被占用、概率质量如何分布、置信度是否可靠”。
 
-但数据规模的变化并不自动等于问题设定的变化。已有航空轨迹预测研究大多仍以连续坐标或四维轨迹回归为中心，例如 Attention-LSTM 四维轨迹预测模型~\cite{jia2022attentionlstm}、基于时频小波变换的轨迹预测方法~\cite{zhang2023wtftp}，以及更近期的直接多时域 FlightBERT++ 框架~\cite{guo_flightbertpp_2024}。另一些工作关注噪声 ADS-B 观测和稀疏卫星观测等更困难的数据条件~\cite{li2025noiserobust,shan2025sparse}。这些方法说明，更强的时间编码和多时域建模确实能够提升点式轨迹预测性能；但当研究对象变成开放运行档案上的 60--120 分钟预测时，单一路径坐标外推并不总是最合适的输出形式。
+开放飞行监视网络和运行档案使这一问题具备了大规模、可复现的研究条件。OpenSky Network 证明了众包 ADS-B 传感网络可以长期支撑航空数据研究~\cite{opensky2014}，OpenSky 2019--2020 数据集进一步展示了开放历史航班数据在跨区域、长时间跨度研究中的价值~\cite{strohmeier2021crowdsourced}。EUROCONTROL 的 Aviation Data Repository for Research（ADRR）提供面向研究和开发的商业航班运行档案~\cite{eurocontrol_adrr_2025}。这些数据源把航空轨迹预测从小规模局部样本推进到统一协议下的大规模建模，也使区域级概率输出可以被系统评价。
 
-原因在于，开放运行数据上的长时域未来本身具有更强的不确定性和多模态性。相同的历史片段可能对应不同航路选择、不同阶段的爬升或下降过程，甚至不同的速度控制策略。此时，把模型能力集中在“给出一条最像真的未来轨迹”上，往往既不利于刻画不确定性，也不利于后续运行解释。对于战略交通态势感知、监视韧性分析、区域级流量推理和候选航路筛选而言，更自然的问题表述是：在给定预测提前量时，航空器未来最可能出现在哪些区域上，以及这些区域的概率是否可信。
+现有数据驱动航空轨迹预测多以连续坐标或四维点轨迹为输出。Attention-LSTM、Attention-TCN-GRU 和 WTFTP 等方法说明，注意力、时序卷积、循环结构和时频建模可以提高四维轨迹预测性能~\cite{jia2022attentionlstm,ma2024attentiontcngru,zhang2023wtftp}；WTFTP+ 和 FlightBERT++ 则进一步把航空预测推进到多时域设置~\cite{guo2026wtftpplus,guo_flightbertpp_2024}。这些工作为时间建模提供了重要基础，但当提前量扩展到 60--120 分钟，并且目标转向区域需求感知时，点轨迹输出会把多模态未来压缩为单一路径，排序质量、似然和校准性也难以在同一离散概率空间中比较。
 
-因此，本文研究\emph{多时域区域航空轨迹预测}。与传统点预测不同，本文不是直接回归未来经纬度序列，而是在多个预测提前量上输出未来 H3 区域概率分布。这样的任务表述有三点实际意义。第一，它显式承认并表达长时域预测的不确定性，而不是把所有不确定性压缩进一条点轨迹。第二，它与开放轨迹档案的空间分辨率和运行多样性更匹配，避免把建模目标过度绑定到精确点位误差。第三，它天然支持面向概率质量和区域效率的评价，包括负对数似然、Brier 分数、期望校准误差，以及候选区域覆盖率、候选 cell 数量和候选面积。
+本文研究\emph{多时域层级区域航空轨迹概率预测}。给定 30 分钟历史监视轨迹和轻量上下文，模型在未来 10、30、60 和 120 分钟输出 H3 区域概率分布。H3 属于离散全球网格系统的一种工程实现，具有层级索引、父子映射和邻域操作等接口~\cite{sahr2003gdggs,h3docs2025}。本文采用 coarse-to-fine 输出协议：短时预测使用较细目标分辨率，长时预测使用更粗空间支撑；模型先预测父层区域，再在父层条件下恢复细粒度区域概率。这样既控制了输出类别规模，也让 top-$k$ 命中率、NLL、Brier 分数和 ECE 可以在同一层级概率协议下报告~\cite{gneiting2007strictlyproper,brier1950verification,guo2017calibration}。
 
-本文工作的技术起点是一个已有的层级 H3 区域预测器，其核心为 GRU 历史编码器和 coarse-to-fine 解码头。我们保留这一层级空间输出框架，因为它已经能够把区域概率预测与父子层级约束、候选区域生成和可解释评估统一起来。本文进一步关注的是时间建模问题：在大规模开放航空轨迹上，什么样的时间结构更适合多时域概率区域预测？我们的实验表明，关键不在于简单地把编码器做得更深，而在于让不同预测时域能够从历史序列中读取不同的信息子集。
+方法上，本文的核心问题是不同预测提前量需要不同的历史证据。10 分钟预测更依赖最近机动和局部连续性，60--120 分钟预测更依赖粗尺度趋势和阶段性演化；把所有 horizon 压到同一个历史摘要上，会削弱这种差异。为此，本文首先提出多尺度 horizon-query 编码器：每个 horizon query 同时检索细尺度 Transformer 历史序列和 stride-pooled 粗尺度历史序列。进一步地，本文提出 Horizon-Router，在一个单模型内部组织 global、coarse-stable 和 local-causal 三个 expert，并由 horizon-level router 为每个预测时域自适应融合三类证据。这一设计承接多时域预测中 horizon-aware 解码的思想~\cite{lim2021tft,mqtransformer2020}，也与 mixture-of-experts 文献中由门控网络组织局部专家的建模谱系一致~\cite{Jacobs_1991,shazeer2017outrageouslylargeneuralnetworks,JMLR:v23:21-0998}。
 
-基于这一判断，本文提出\emph{多尺度 horizon-query Transformer}。模型由细粒度历史编码分支、粗粒度池化历史编码分支以及面向不同预测时域的可学习 query 组成；不同 horizon 通过 query attention 从编码状态中检索与本时域最相关的历史上下文，而后接入与基线兼容的层级 H3 解码器。这样的设计使时间建模改进可以在不破坏原有输出协议的前提下被单独评估，也便于与 Markov 基线、层级 GRU 基线、结构消融模型以及适配后的外部基线进行公平比较。
+仅加入 expert routing 并不足以保证稳定训练。大规模路由模型容易出现专家塌缩或 router 权重过早固化，尤其是在不同 horizon 的标签可用性和类别规模并不完全一致时。本文因此引入一组与训练目标直接耦合的路由约束：根据各 expert 在当前 batch 上的粗区域、子区域和状态损失构造 soft router target；用 active expert mask 限定 local-causal expert 只服务短时 horizon；用 load balancing 和 expert auxiliary loss 保持专家可训练；再用 horizon-wise teacher distillation 从若干强神经专家的混合预测中传递概率信息。知识蒸馏和模型压缩已有成熟基础~\cite{bucila2006model_compression,hinton2015distilling,furlanello2018born_again}，本文将其用于层级 H3 区域概率输出和时域级路由训练。
 
 本文主要贡献如下：
 \begin{enumerate}
-  \item 基于 ADRR 派生的一个月商业航班轨迹数据，将大规模开放运行档案上的多时域航空预测问题形式化为层级 H3 概率区域预测任务，并给出可复现的数据划分与评估协议。
-  \item 提出多尺度 horizon-query Transformer，在保持 coarse-to-fine H3 输出结构不变的前提下，显式建模不同预测时域对历史上下文的差异化需求，并在完整数据集上稳定提升区域准确率与概率质量。
-  \item 建立兼顾精度、概率质量和区域效率的评估视角，同时报告 top-k 命中率、NLL、Brier 分数、ECE、候选覆盖率、候选 cell 数量与候选面积，而不是只依赖单一命中率指标。
-  \item 给出与经典 Markov 基线、层级 GRU 基线、结构消融模型以及适配后的强外部基线的比较，并通过 H3 邻域 refinement 消融说明候选召回与概率校准之间存在明确权衡。
+  \item 提出多尺度 horizon-query 编码器，使每个预测时域分别从细尺度历史序列和粗尺度池化序列中检索时间证据，避免所有 horizon 共用单一历史摘要。
+  \item 提出 Horizon-Router 单模型，在统一 coarse-to-fine H3 输出头下融合 global、coarse-stable 和 local-causal 三个内部 expert，用 horizon-level router 建模不同提前量对历史证据的差异化需求。
+  \item 引入面向路由训练的 loss-aware regularization 与 horizon-wise distillation，并在 20,712,602 个 ADRR 派生预测窗口上，与 Markov、层级 GRU、Transformer horizon decoder、Multiscale Transformer、TrAISformer-H3 和 FlightBERT++-H3 等基线进行完整规模比较。
 \end{enumerate}

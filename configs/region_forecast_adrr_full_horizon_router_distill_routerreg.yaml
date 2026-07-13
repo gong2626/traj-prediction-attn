@@ -84,7 +84,7 @@ model:
   router_init_local_bias: 0.0
 
 training:
-  batch_size: 1024
+  batch_size: 4096
   epochs: 1000
   min_epochs: 8
   learning_rate: 0.0002

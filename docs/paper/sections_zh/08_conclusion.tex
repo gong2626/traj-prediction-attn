@@ -1,7 +1,7 @@
 \section{结论}
 
-本文基于 ADRR 派生开放航空数据，对多时域区域航空轨迹预测进行了大规模实验研究。以层级 H3 GRU 基线为起点，我们引入 horizon-query Transformer decoder，并进一步加入显式多尺度时间分支。最终模型相较 GRU 基线和单尺度 Transformer 消融模型，在 top-k 准确率、NLL、Brier 分数和校准性上均取得提升，同时生成更小的候选区域集合。经典 Markov 基线明显较弱，这说明该任务需要比简单经验转移建模更强的时间表示学习能力。
+本文基于 ADRR 派生开放航空数据，研究面向未来空域需求感知的多时域层级区域航空轨迹概率预测。围绕这一任务，本文提出多尺度 horizon-query 编码器和 Horizon-Router 单模型：前者让每个 horizon 同时读取细尺度与粗尺度历史证据，后者用 global、coarse-stable 和 local-causal 三个 expert 以及 horizon-level router 建模不同提前量的证据需求。训练上，本文引入基于 expert loss 的路由监督、活跃 expert mask、负载均衡、辅助 expert 监督和 horizon-wise distillation，以稳定路由模型训练。
 
-H3 refinement 实验进一步说明，候选召回和校准性应当一起报告。一个激进扩展候选区域的模型，在只看召回时可能显得更强，但其概率可信度会下降。因此，大规模区域航空预测应被评估为准确性、不确定性质量和空间效率的联合问题。
+完整规模实验显示，Horizon-Router 相较 Markov、层级 GRU、Transformer horizon decoder、Multiscale Transformer、TrAISformer-H3 和 FlightBERT++-H3，在 top-1/top-5、NLL 和 Brier 分数上取得更好的整体结果，并保持较低 ECE。路由训练机制的逐项效果仍需要后续完整规模消融进一步确认。
 
-总体而言，实验结果支持将层级 H3 预测与多尺度 horizon-query 时间编码结合，作为开放轨迹档案上长时域区域航空预测的强基线。它也为下一步方法研究提供了稳定基础：在缺失和不规则飞行观测下，进一步构建显式不确定性感知的区域预测模型。
+总体而言，实验结果支持将长时航空预测表述为层级 H3 区域概率建模问题。下一步更值得推进的是缺失观测下的不确定性建模、完整规模逐项路由消融、预测集合面积协议，以及跨数据源的区域需求聚合验证。

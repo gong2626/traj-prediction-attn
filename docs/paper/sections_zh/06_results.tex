@@ -1,8 +1,8 @@
 \section{结果}
 
-\subsection{完整规模主结果比较}
+\subsection{Q1：完整规模主结果比较}
 
-表~\ref{tab:main-results-zh} 报告四个预测时域上的宏平均结果。
+表~\ref{tab:main-results-zh} 比较所有模型在 10、30、60 和 120 分钟预测时域上的宏平均结果。
 
 \begin{table}[!t]
 \centering
@@ -10,42 +10,22 @@
 \resizebox{\textwidth}{!}{%
 \input{tables_zh/main_results_zh.tex}
 }
-\caption{10、30、60 和 120 分钟预测时域上的完整规模宏平均比较。}
+\caption{完整规模测试集上的宏平均比较。Horizon-Router 在 top-1、top-5、NLL 和 Brier 上取得最优结果，并保持较低 ECE。}
 \label{tab:main-results-zh}
 \end{table}
 
 \begin{figure}[!t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig2_main_results_overview.pdf}
-\caption{完整规模主结果概览。相较内部基线和两个外部适配基线，所提出的多尺度模型在 top-1、Brier 分数和候选集合紧致性上保持整体最优平衡。}
+\caption{完整规模学习模型主结果概览。Markov 基线保留在表~\ref{tab:main-results-zh} 中作为经典统计参照；本图只展示神经模型之间的差异。}
 \label{fig:main-results-overview-zh}
 \end{figure}
 
-结果有三点值得注意。首先，所有学习型层级模型都显著优于经典 Markov 基线。其次，在两个外部适配基线中，TrAISformer-H3 是最强竞争者：它取得最高的宏平均 top-3/top-5、最低的 NLL，以及最高的 union cover。第三，所提出的多尺度模型仍然保持最佳宏平均 top-1（0.6827）、最佳 Brier 分数（0.4338）和最小的 candidate union cell 数（2.1829），说明它在分类正确性、概率质量和候选集合紧致性之间取得了更均衡的折中。
+Horizon-Router 的宏平均 top-1/top-5 为 0.6884/0.9710，在所有内部基线和两个外部适配基线中最高。概率质量上，Horizon-Router 的 NLL 为 0.9399，Brier 为 0.4262，也优于最强外部适配基线的 0.9556 和 0.4361。ECE 方面，外部适配基线的最低值为 0.0086；Horizon-Router 的 ECE 为 0.0104，仍处于较低水平。总体看，最终模型的主要收益来自更好的区域排序和似然/二次评分质量，而不是单一校准指标上的孤立最优。
 
-FlightBERT++-H3 呈现另一种行为模式。它的宏平均 ECE 最低（0.0086），候选 union 面积也最小（117,593 km$^2$），但 top-1/top-3/top-5 和 union cover 均低于所提模型。这说明更保守、更紧的候选集合并不自动意味着更好的整体区域预测；如果排序能力下降，候选覆盖也会同步退化。
+\subsection{Q2：多尺度编码与专家路由的结构收益}
 
-从逐时域结果看，TrAISformer-H3 在 10 和 30 分钟时域上略优于所提模型的 top-3/top-5，但在 120 分钟时域上，所提模型重新取得明显优势：top-1 从 0.5481 提升到 0.5565，top-3 从 0.8482 提升到 0.8531，top-5 从 0.9355 提升到 0.9372，同时 NLL、Brier 和 ECE 也全部更优。这一现象支持本文的核心判断：显式多尺度时间建模的价值主要体现在中长时域区域预测，而不是只在短时排序指标上获益。
-
-\subsection{相较层级 GRU 基线的提升}
-
-相较层级 GRU 基线，所提模型提升了所有 top-k 指标和所有概率指标：top-1 从 0.6648 提升到 0.6827，top-3 从 0.9076 提升到 0.9174，top-5 从 0.9631 提升到 0.9685；NLL 从 1.0214 降至 0.9641，Brier 分数从 0.4578 降至 0.4338，ECE 从 0.0180 降至 0.0093。
-
-提升在不同预测时域上具有一致性。表~\ref{tab:delta-gru-zh} 给出了相较 GRU 基线的逐时域差值。
-
-\begin{table}[!t]
-\centering
-\small
-\resizebox{\textwidth}{!}{%
-\input{tables_zh/delta_final_vs_gru_zh.tex}
-}
-\caption{所提模型相较层级 GRU 基线的逐时域差值。对于 top-k 和 union cover，正值更好；对于 NLL、Brier、ECE、候选 cell 和候选面积，负值更好。}
-\label{tab:delta-gru-zh}
-\end{table}
-
-\subsection{结构消融：多尺度分支是否必要}
-
-为了分离显式多尺度时间编码的价值，我们将最终模型与单尺度 Transformer horizon decoder 比较。后者已经具有时域专属 query，但不包含多尺度分支。
+表~\ref{tab:structural-ablation-zh} 把内部结构演化拆成三步：单尺度 horizon-query、多尺度 horizon-query 和 Horizon-Router。
 
 \begin{table}[!t]
 \centering
@@ -53,35 +33,24 @@ FlightBERT++-H3 呈现另一种行为模式。它的宏平均 ECE 最低（0.008
 \resizebox{\textwidth}{!}{%
 \input{tables_zh/structural_ablation_zh.tex}
 }
-\caption{单尺度 Transformer horizon decoder 与所提出多尺度模型的结构消融比较。}
+\caption{内部结构演化比较。Multiscale Transformer 分离多尺度时间编码的收益；Horizon-Router 进一步加入三专家融合和路由训练。}
 \label{tab:structural-ablation-zh}
 \end{table}
 
-多尺度分支改善了所有主要宏平均指标，并取得更低的验证损失（0.3055 对 0.3177）。这支持本文判断：显式双尺度时间建模带来的收益，并不只是把 GRU 替换为 Transformer 所能解释。
+从 Transformer horizon decoder 到 Multiscale Transformer，top-1 从 0.6744 提升到 0.6827，NLL 从 0.9946 降到 0.9641，Brier 从 0.4447 降到 0.4338，说明显式粗尺度时间分支带来稳定收益。Horizon-Router 在此基础上继续提升到 0.6884 top-1、0.9710 top-5、0.9399 NLL 和 0.4262 Brier。这一结果支持本文的两个方法判断：horizon-query 需要多尺度历史证据，且不同 horizon 还受益于时域级 expert routing。
 
-\subsection{H3 邻域 refinement 体现召回与校准的权衡}
-
-接着，我们在三个扩散强度上评估 H3 邻域 refinement。该策略提高了概率质量候选召回，但不是无代价收益。
+相较层级 GRU，Horizon-Router 在四个 horizon 上均改善 top-k 与概率指标。表~\ref{tab:delta-gru-zh} 给出逐时域差值；提升在 30 和 120 分钟上尤其明显，分别带来 +0.0304 和 +0.0242 的 top-1 增益。
 
 \begin{table}[!t]
 \centering
 \small
 \resizebox{\textwidth}{!}{%
-\input{tables_zh/h3_refinement_sweep_zh.tex}
+\input{tables_zh/delta_final_vs_gru_zh.tex}
 }
-\caption{完整数据集上的 H3 邻域 refinement sweep。更高的 union cover 伴随更差的校准性和更大的候选集合。}
-\label{tab:h3-refine-zh}
+\caption{Horizon-Router 相较层级 GRU 基线的逐时域差值。对于 top-k，正值更好；对于 NLL、Brier 和 ECE，负值更好。}
+\label{tab:delta-gru-zh}
 \end{table}
 
-\begin{figure}[!t]
-\centering
-\includegraphics[width=0.78\textwidth]{figures/fig3_h3_refinement_tradeoff.pdf}
-\caption{H3 邻域 refinement 提高候选 union cover，但额外召回以更差校准性和更大空间候选面积为代价。}
-\label{fig:h3-refinement-tradeoff-zh}
-\end{figure}
+\subsection{Q3：路由训练机制的完整规模消融}
 
-refinement 提高了候选 union cover，但很快损害校准性，并最终恶化 top-5 和 NLL。因此，它不应作为最终模型呈现。它的价值在于揭示一个具有运行意义的权衡：本地空间平滑可以提高召回，但会牺牲置信度质量和空间紧凑性。
-
-\subsection{Reachability filtering 的聚合影响较小}
-
-关闭 reachability filtering 只带来很小的聚合指标变化。这说明在当前设置中，reachability filtering 更像是一个可达性合理性保护，而不是预测收益的主要来源。
+本节预留给完整规模训练消融。需要补充三组共享数据划分、初始化 checkpoint、训练预算和评价协议的 Horizon-Router 变体：router only、router + horizon-wise distillation，以及 router + horizon-wise distillation + loss-aware routing regularization。当前稿件不使用开发子集诊断结果作为主文证据；待三组完整规模实验完成后，本节应报告与表~\ref{tab:main-results-zh} 相同的五个指标，并只讨论蒸馏和路由正则是否带来可复现的 full-scale 增益。

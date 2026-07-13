@@ -1,8 +1,9 @@
-\begin{tabular}{lcccccccc}
+\begin{tabular}{lccccc}
 \toprule
-Model & Top1 & Top3 & Top5 & NLL & Brier & ECE & Cover@Budget & Union Area km$^2$ \\
+Model & Top1 & Top5 & NLL & Brier & ECE \\
 \midrule
-Transformer horizon decoder & 0.6744 & 0.9129 & 0.9656 & 0.9946 & 0.4447 & 0.0123 & 0.9981 & 122553 \\
-\textbf{Proposed multiscale model} & \textbf{0.6827} & \textbf{0.9174} & \textbf{0.9685} & \textbf{0.9641} & \textbf{0.4338} & \textbf{0.0093} & \textbf{0.9983} & \textbf{118810} \\
+Transformer horizon decoder & 0.6744 & 0.9656 & 0.9946 & 0.4447 & 0.0123 \\
+Multiscale Transformer & 0.6827 & 0.9685 & 0.9641 & 0.4338 & \textbf{0.0093} \\
+\textbf{Horizon-Router} & \textbf{0.6884} & \textbf{0.9710} & \textbf{0.9399} & \textbf{0.4262} & 0.0104 \\
 \bottomrule
 \end{tabular}

@@ -1,59 +1,48 @@
 \section{实验设置}
 
+\subsection{研究问题}
+
+实验围绕三个问题展开。Q1：Horizon-Router 在完整规模数据上是否超过外部适配强基线和内部结构基线？Q2：性能收益来自多尺度 horizon-query 编码，还是来自后续 expert routing？Q3：在完整规模训练下，horizon-wise distillation 和 loss-aware routing regularization 是否分别改善路由模型？
+
 \subsection{数据与划分协议}
 
 实验使用基于 ADRR 构建的 2024 年 3 月商业航班轨迹档案。按照项目既有流程，原始记录先按 90 分钟时间缺口切分为 mission，并对不超过 30 分钟的局部缺口做规则化处理；随后轨迹被重采样到 5 分钟时间网格，并构造区域、数值、mask 和上下文特征。为避免过短或信息不足的片段进入训练集，本文要求有效轨迹段至少包含 8 个重采样点。
 
-处理完成后，数据集中共有 20,712,602 个预测窗口，其中训练集、验证集和测试集分别包含 14,505,637、3,108,933 和 3,098,032 个窗口。与很多窗口级随机切分方案不同，本文按航空器 id 进行 train/val/test 划分，从而尽量避免同一航空器的重复运行模式同时出现在训练和测试中。由于研究对象是开放运行档案而非单机场局部场景，这样的划分更接近真实部署时面对未见航空器或未见轨迹片段的情形。
+处理完成后，数据集中共有 20,712,602 个预测窗口，其中训练集、验证集和测试集分别包含 14,505,637、3,108,933 和 3,098,032 个窗口。本文按航空器 id 进行 train/val/test 划分，从而减少同一航空器的重复运行模式同时出现在训练和测试中的风险。
 
 \subsection{时间与空间协议}
 
-所有模型统一使用 30 分钟历史、5 分钟采样间隔和 4 个预测时域 $\{10,30,60,120\}$ 分钟。对应的输入历史长度为 6 个时间步。空间离散化基于 H3：输入区域分辨率为 3，其父层输入分辨率为 2；目标细粒度分辨率为 $[3,3,2,2]$，对应粗粒度分辨率为 $[2,2,1,1]$。这一设置意味着 10 和 30 分钟预测仍保留较细空间粒度，而 60 和 120 分钟预测则在更宽的空间支撑上建模未来不确定性。
-
-在层级推理阶段，粗区域 top-$K$ 值统一设置为 $[64,48,48,12]$。该设置兼顾了短时域更大的局部候选分支和长时域更粗空间分辨率下较小的父层类别规模。
+所有模型统一使用 30 分钟历史、5 分钟采样间隔和 4 个预测时域 $\{10,30,60,120\}$ 分钟。输入历史长度为 6 个时间步。空间离散化基于 H3：输入区域分辨率为 3，其父层输入分辨率为 2；目标细粒度分辨率为 $[3,3,2,2]$，对应粗粒度分辨率为 $[2,2,1,1]$。这一设置使 10 和 30 分钟预测保留较细空间粒度，而 60 和 120 分钟预测在更宽的空间支撑上建模未来不确定性。层级推理阶段，粗区域 top-$K$ 值统一设置为 $[64,48,48,12]$。
 
 \subsection{比较模型}
 
-本文报告六类代表性模型。
+本文报告七类模型。
 \begin{enumerate}
   \item \textbf{Markov baseline}：以当前输入区域为状态，统计从当前区域到未来区域和未来状态的经验转移频次，并使用加一平滑得到各 horizon 上的区域和状态概率。
   \item \textbf{Hierarchical GRU}：项目原始层级区域预测基线，使用共享 GRU 时间摘要和 coarse-to-fine H3 输出头。
   \item \textbf{Transformer Horizon Decoder}：在层级 H3 输出头不变的条件下，用单尺度 horizon-query Transformer 替代 GRU 共享时间摘要。
-  \item \textbf{Multiscale Transformer}：本文提出的最终模型，在单尺度 horizon-query 基础上加入显式粗尺度时间分支。
-  \item \textbf{TrAISformer-H3}：保留 TrAISformer 风格的因果离散序列建模结构，并将其输出端适配为本文统一的层级 H3 输出头。
+  \item \textbf{Multiscale Transformer}：在单尺度 horizon-query 基础上加入 stride-pooled 粗尺度时间分支。
+  \item \textbf{Horizon-Router}：本文最终模型，在 Multiscale Transformer 基础上加入 global、coarse-stable 和 local-causal 三专家，以及 horizon-level router、路由正则和蒸馏训练。
+  \item \textbf{TrAISformer-H3}：保留 TrAISformer 风格的因果离散序列建模结构，并将输出端适配为本文统一的层级 H3 输出头。
   \item \textbf{FlightBERT++-H3}：保留 FlightBERT++ 风格的非自回归 encoder-decoder 多 horizon 解码结构，并将原始飞行状态输出替换为本文统一的层级 H3 输出头。
 \end{enumerate}
 
-这里的 TrAISformer-H3 和 FlightBERT++-H3 都是\emph{适配基线}而非原论文任务的逐字复现。为了保证比较公平，我们固定了输入历史、预测时域、H3 输出空间、层级损失和评价指标，只允许时间建模主干和与之相关的训练超参数发生变化。相比之下，大量已有航空轨迹文献仍以短时坐标误差或局部空域点预测为中心，若不经过这一适配过程，无法直接与本文的区域概率预测协议进行同表比较。
+TrAISformer-H3 和 FlightBERT++-H3 是适配基线，而不是原论文任务的逐字复现。为了保证比较口径一致，所有方法固定输入历史、预测时域、H3 输出空间、层级损失和评价指标，只允许时间建模主干及其稳定收敛所需的训练超参数不同。
 
-\subsection{训练设置与公平性说明}
+\subsection{训练设置}
 
-所有神经模型均在单张 CUDA GPU 上训练，使用 AdamW 优化器和固定随机种子 42。GRU 基线沿用项目原始 full 配置：batch size 为 1024，最大 epoch 为 400，最少训练 15 个 epoch，学习率调度阈值与早停阈值均为 $5\times10^{-4}$。Transformer 家族模型（单尺度 ablation 和最终多尺度模型）统一采用 batch size 1024、8 个 DataLoader workers、混合精度训练、学习率 $1.5\times10^{-4}$、weight decay $10^{-4}$、梯度裁剪 1.0，并使用以下调度和早停配置：最大 epoch 1000、最少训练 8 个 epoch、ReduceLROnPlateau patience 4、factor 0.5、绝对阈值 $3\times10^{-4}$、early stopping patience 8、min delta $3\times10^{-4}$。
-
-对外部适配基线，我们保持相同的数据协议、输出头和评价协议，但允许采用各自稳定收敛所需的吞吐配置。具体而言，TrAISformer-H3 和 FlightBERT++-H3 使用 batch size 2048、12 个 workers、混合精度、学习率 $2\times10^{-4}$，其余调度器和早停规则与 Transformer 家族模型保持一致。这样做的目的不是给予外部基线额外优势，而是避免把它们限制在明显次优的系统吞吐配置上。
-
-最终 full-scale 训练的最佳验证损失和停止轮数分别为：Hierarchical GRU 不再以本文新协议重新调参；Transformer horizon decoder 在第 182 个 epoch 达到最优验证损失 0.3177；最终多尺度模型在第 182 个 epoch 达到最优验证损失 0.3055；TrAISformer-H3 在第 136 个 epoch 达到最优验证损失 0.3077；FlightBERT++-H3 在第 100 个 epoch 达到最优验证损失 0.3149。
+所有神经模型均使用 AdamW、固定随机种子 42、混合精度训练和早停策略。GRU 基线沿用项目原始 full 配置。Transformer Horizon Decoder 和 Multiscale Transformer 使用 batch size 1024、8 个 DataLoader workers、学习率 $1.5\times10^{-4}$、weight decay $10^{-4}$、梯度裁剪 1.0、ReduceLROnPlateau 调度器和 early stopping。Horizon-Router 从完整规模 Multiscale Transformer checkpoint 初始化，不冻结初始化参数；其完整规模训练使用 batch size 4096、学习率 $2\times10^{-4}$，并额外使用 teacher distillation、router supervision、load balancing 和 expert auxiliary loss，权重见方法章。外部适配基线使用相同的数据和输出协议，但采用各自稳定收敛的吞吐配置。
 
 \subsection{评价指标}
 
-本文同时从分类性能、概率质量和候选区域效率三个层面评价模型。
+本文主表只报告由预测概率分布直接定义的五个指标，避免把额外预测集合构造混入模型比较。
 
 \textbf{分类性能。}
-我们报告每个 horizon 上的 region top-1/top-3/top-5 命中率，并在主表中给出四个 horizon 的宏平均结果。状态预测同时输出 airborne/landed 概率，但在完整数据集上所有神经模型和 Markov 基线的状态准确率均接近 1.0，因此状态指标只保留为完整性报告，不作为区分模型优劣的主依据。
+报告每个 horizon 上的 region top-1 和 top-5 命中率，并在主表中给出四个 horizon 的宏平均结果。状态预测同时输出 airborne/landed 概率；在完整数据集上状态准确率接近 1.0，因此状态指标只保留为完整性报告，不作为区分模型优劣的主依据。
 
 \textbf{概率质量。}
-区域概率通过 NLL、Brier 分数和 10-bin ECE 评价。对层级模型，评价时使用由粗区域分布与条件子区域分布组合得到的细粒度 H3 概率；若真值 coarse 和 child 标签都可用，则 NLL 还可精确写成真值粗区域概率与真值子区域条件概率的乘积形式。
+区域概率通过 NLL、Brier 分数和 10-bin ECE 评价。对层级模型，评价时使用由粗区域分布与条件子区域分布组合得到的细粒度 H3 概率。
 
-\textbf{候选区域效率。}
-对每个 horizon，首先按概率从高到低选取细粒度 cell，直到累计概率质量达到 0.8 或达到 cell 预算 $B=[24,18,18,24]$；再按 H3 1-ring 邻接关系把这些 cell 合并为连通组件，并按组件置信度排序。基于这一构造，本文报告：
-\begin{enumerate}
-  \item \emph{candidate union cover}（候选并集覆盖率）：真实目标 cell 是否落在全部候选组件并集中；
-  \item \emph{candidate union cell count mean} 与 \emph{candidate union area mean}：候选并集的平均规模与平均面积；
-  \item \emph{Cover@Budget}（固定预算覆盖率）：只保留固定 cell 预算 $B_j$ 个最高概率 cell 时的覆盖率；
-  \item \emph{Area@Budget}：对应固定 cell 预算下的平均区域面积。
-\end{enumerate}
-其中，候选并集覆盖率回答的是“在给定概率质量预算下，候选并集能否覆盖真实未来位置”；固定预算覆盖率则更直接反映固定空间预算下的召回能力。
+\subsection{推理约束}
 
-\subsection{默认后处理与消融设置}
-
-除非特别说明，主结果默认启用 reachability filter，不启用 H3 neighbor refinement。Reachability filter 根据当前 H3 cell 到目标 H3 cell 的球面距离剔除明显不可达的区域，阈值由最大速度 750 knots 和额外 250 km 余量共同决定。H3 refinement 则只在消融实验中使用，统一采用 1-ring 邻域，并测试 $\alpha\in\{0.05,0.10,0.20\}$ 三个概率扩散强度。此外，本文还单独报告关闭 reachability filter 的评价结果，以区分“模型本身的概率分布”与“几何可达性约束”对最终指标的贡献。
+所有模型使用相同的层级概率恢复流程和可达性掩码，粗区域 top-$K$ 与方法章保持一致。主结果不使用额外邻域概率扩散，也不构造额外预测集合；预测集合面积等空间范围评价将在后续采用更独立的协议重新设计。

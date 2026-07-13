@@ -41,6 +41,8 @@ MODEL_COLORS = {
     "FlightBERT++-H3": "#ef4444",
     "Transformer horizon decoder": "#a78bfa",
     "Proposed multiscale model": "#22c55e",
+    "Multiscale Transformer": "#10b981",
+    "Horizon-Router": "#22c55e",
     "Final model": "#22c55e",
     "Refine a=0.05": "#60a5fa",
     "Refine a=0.10": "#f59e0b",
@@ -166,7 +168,7 @@ def method_architecture() -> None:
         ax,
         (0.78, 0.08),
         (0.18, 0.13),
-        "Per-horizon H3\nregion probabilities\nand candidate sets",
+        "Per-horizon H3\nregion probabilities\nand calibration metrics",
         METHOD_COLORS["output"],
     )
 
@@ -202,6 +204,7 @@ def method_architecture() -> None:
 
 def main_results_overview() -> None:
     df = pd.read_csv(TABLE_DIR / "main_results.csv")
+    df = df[df["Model"] != "Markov baseline"].reset_index(drop=True)
     label_map = {
         "Markov baseline": "Markov",
         "Hierarchical GRU": "GRU",
@@ -209,14 +212,16 @@ def main_results_overview() -> None:
         "FlightBERT++-H3": "FB++",
         "Transformer horizon decoder": "TF-dec",
         "Proposed multiscale model": "Ours",
+        "Multiscale Transformer": "MS-TF",
+        "Horizon-Router": "HR",
     }
     labels = [label_map.get(name, name) for name in df["Model"]]
     colors = [MODEL_COLORS[v] for v in df["Model"]]
     metrics = [
+        ("Top1", "Top-1 accuracy", True),
         ("Top5", "Top-5 accuracy", True),
         ("NLL", "Negative log-likelihood", False),
-        ("ECE", "Expected calibration error", False),
-        ("UnionArea", "Candidate area (km$^2$)", False),
+        ("Brier", "Brier score", False),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(12.0, 7.2))
     axes = axes.ravel()
@@ -226,8 +231,6 @@ def main_results_overview() -> None:
         ax.set_title(title, fontsize=11, fontweight="bold")
         ax.grid(axis="y", color="#e2e8f0", linewidth=0.8)
         ax.set_axisbelow(True)
-        if col == "UnionArea":
-            ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
         for tick in ax.get_xticklabels():
             tick.set_rotation(18)
             tick.set_ha("right")
@@ -237,49 +240,13 @@ def main_results_overview() -> None:
         ymin, ymax = ax.get_ylim()
         pad = (ymax - ymin) * 0.02
         for idx, val in enumerate(values):
-            text = f"{val:.4f}" if col != "UnionArea" else f"{val/1000:.0f}k"
-            ax.text(idx, val + pad, text, ha="center", va="bottom", fontsize=8)
-    fig.suptitle("Full-scale macro performance across four forecast horizons", fontsize=14, fontweight="bold")
+            ax.text(idx, val + pad, f"{val:.4f}", ha="center", va="bottom", fontsize=8)
+    fig.suptitle("Full-scale learned-model comparison across four forecast horizons", fontsize=14, fontweight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     _save(fig, "fig2_main_results_overview")
 
-
-def h3_refinement_tradeoff() -> None:
-    df = pd.read_csv(TABLE_DIR / "h3_refinement_sweep.csv")
-    labels = ["Final", "a=0.05", "a=0.10", "a=0.20"]
-    colors = [MODEL_COLORS[v] for v in df["Model"]]
-    fig, axes = plt.subplots(1, 2, figsize=(10.8, 4.2))
-
-    ax = axes[0]
-    ax.plot(df["UnionCover"], df["ECE"], color="#334155", linewidth=1.0, zorder=1)
-    for i, row in df.iterrows():
-        ax.scatter(row["UnionCover"], row["ECE"], s=90, color=colors[i], edgecolor="#0f172a", zorder=2)
-        ax.annotate(labels[i], (row["UnionCover"], row["ECE"]), textcoords="offset points", xytext=(6, 5), fontsize=8)
-    ax.set_xlabel("Candidate union cover")
-    ax.set_ylabel("ECE")
-    ax.set_title("Recall-calibration trade-off", fontsize=11, fontweight="bold")
-    ax.grid(True, color="#e2e8f0")
-
-    ax = axes[1]
-    ax.plot(df["UnionCover"], df["UnionArea"], color="#334155", linewidth=1.0, zorder=1)
-    for i, row in df.iterrows():
-        ax.scatter(row["UnionCover"], row["UnionArea"], s=90, color=colors[i], edgecolor="#0f172a", zorder=2)
-        ax.annotate(labels[i], (row["UnionCover"], row["UnionArea"]), textcoords="offset points", xytext=(6, 5), fontsize=8)
-    ax.set_xlabel("Candidate union cover")
-    ax.set_ylabel("Candidate area (km$^2$)")
-    ax.set_title("Recall-spatial compactness trade-off", fontsize=11, fontweight="bold")
-    ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
-    ax.grid(True, color="#e2e8f0")
-
-    fig.suptitle("H3-neighbor refinement improves coverage by sacrificing calibration and compactness", fontsize=13, fontweight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
-    _save(fig, "fig3_h3_refinement_tradeoff")
-
-
 def main() -> None:
-    method_architecture()
     main_results_overview()
-    h3_refinement_tradeoff()
     print(f"Saved figures to {FIG_DIR}")
 
 

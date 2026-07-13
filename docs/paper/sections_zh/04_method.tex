@@ -2,134 +2,136 @@
 
 \subsection{总体思路}
 
-本文方法建立在一个统一的层级 H3 预测框架上：所有神经模型都使用相同的输入张量格式、相同的粗到细输出头、相同的层级损失定义以及相同的评价协议。这样做有两个目的。第一，它把研究重点集中在\emph{时间建模结构}本身，而不是把性能变化混杂到输出空间或评价口径中。第二，它使内部模型演化和外部适配基线都能在同一 H3 区域预测任务下公平比较；不同模型在训练时只允许采用各自稳定收敛所需的超参数设置。
+本文方法建立在统一的层级 H3 区域预测框架上。输入端，历史轨迹被编码为区域 token、父层区域 token、数值运动特征、mask 特征和轻量上下文；输出端，所有模型共享 coarse-to-fine H3 输出头，先预测父层区域，再在父层条件下预测子区域分布。这样可以把研究重点放在时间证据如何被读取和融合上，而不是把收益混入不同输出空间或评价口径。
 
-整体流程如下。原始飞行记录先经 mission 切分和 5 分钟重采样，随后被编码为历史区域 token、父层区域 token、数值运动特征、mask 特征和上下文特征。时间编码模块将历史序列映射为针对不同 horizon 的解码特征；层级输出头再分别预测粗区域、状态以及条件细区域分布。推理阶段，粗区域分布和条件子区域分布被组合成细粒度 H3 概率，随后再进入 reachability filtering 和候选区域生成模块。
-
-\subsection{输入表示与时间有效掩码}
-
-对每个时间步 $z_t=(r_t,p_t,u_t,m_t)$，模型分别学习输入区域 embedding、父层区域 embedding，并将数值特征和 mask 特征线性投影到同一隐空间。设嵌入和投影后的时间步表示为
-\begin{equation}
-\tilde{z}_t = [E_r(r_t); E_p(p_t); W_u u_t; W_m m_t].
-\end{equation}
-其中 $E_r(\cdot)$ 和 $E_p(\cdot)$ 分别是输入 H3 区域与父层区域 embedding 表，$W_u$ 和 $W_m$ 为数值与 mask 投影矩阵。样本级上下文向量 $c$ 通过单独线性层投影后，与时间编码摘要拼接。
-
-项目实现没有简单地把全部填充值都视为有效观测，而是根据 \texttt{observed\_flag}、\texttt{gap\_flag} 和未知区域 token 共同构造时间有效掩码。只有在时间步不是“由缺口补齐且区域未知”的情况下，该时间步才被视为有效。这一掩码被所有 attention 或 pooling 模块共享，用于抑制填充片段对历史摘要的污染。
-
-\subsection{共享的层级 H3 输出头}
-
-所有层级模型共享同一输出协议。对每个预测时域 $h_j$，模型先输出粗粒度 logits
-\begin{equation}
-g_j^{(c)} \in \mathbb{R}^{C_j},
-\end{equation}
-其中 $C_j$ 是该时域对应粗分辨率下的区域类别数；同时输出状态 logits
-\begin{equation}
-g_j^{(s)} \in \mathbb{R}^{2}.
-\end{equation}
-随后，给定某个粗区域 id $y_j^{(c)}$，模型再通过一个条件子头输出该父区域下的子区域 logits
-\begin{equation}
-g_j^{(f)}(\,\cdot \mid y_j^{(c)}) \in \mathbb{R}^{M_j},
-\end{equation}
-其中 $M_j$ 为该时域下预设的最大子类长度。实现上，每个 coarse id 都关联一张合法子类掩码表；超出该父区域实际子类数的 logits 在训练和推理中都被屏蔽为极小值。
-
-训练阶段，子区域交叉熵使用\emph{真值粗区域标签}作为条件，从而稳定地学习父子层级对应关系。推理阶段，模型先从粗区域分布中选取 top-$K_j$ 个父区域，再对每个父区域计算条件子分布，并按
-\begin{equation}
-p(y_j^{(f)}=c \mid X)
-=
-\sum_{y_j^{(c)} \in \mathcal{P}_{K_j}}
-p(y_j^{(c)} \mid X)\,
-p(y_j^{(f)}=c \mid y_j^{(c)}, X)
-\end{equation}
-把父层概率质量散射回细粒度 H3 cell。未被显式分配的剩余概率质量被写入 unknown 类，以保证每个时域上的细粒度概率和为 1。本文完整实验中使用的父层 top-$K$ 为 $[64,48,48,12]$。
-
-\subsection{层级 GRU 基线}
-
-项目原始基线是层级 GRU 预测器。它把时间步表示序列 $\{\tilde{z}_t\}_{t=1}^T$ 输入多层 GRU 编码器，以最终隐状态 $h_T$ 作为历史摘要，再与上下文投影拼接得到共享特征
-\begin{equation}
-b = [h_T; W_c c].
-\end{equation}
-对每个 horizon，粗区域头和状态头都直接以这一共享特征为输入，子区域头则在共享特征基础上再拼接父区域 embedding。
-
-这一基线已经具备较强的空间结构先验，但它把所有预测时域都压缩到同一时间摘要 $b$ 上。换言之，10 分钟与 120 分钟预测只能共享同一段时间表征，无法显式访问历史中的不同时段信息。后续实验表明，这正是时间建模的主要瓶颈。
-
-\subsection{单尺度 Horizon-Query Transformer}
-
-为缓解单一时间摘要带来的信息瓶颈，我们首先把 GRU 时间编码器替换为 horizon-aware Transformer 编码器。具体地，拼接后的时间步表示先被投影到统一隐空间，并加入可学习位置 embedding：
-\begin{equation}
-H^{(0)} = W_z \tilde{Z} + P.
-\end{equation}
-随后，$H^{(0)}$ 进入带时间有效掩码的 Transformer encoder，得到历史编码序列
-\begin{equation}
-H = \mathrm{Enc}(H^{(0)}).
-\end{equation}
-与直接取最后一个时间步不同，编码器输出首先做 masked mean pooling，与上下文投影拼接形成共享基特征 $b$。
-
-对每个预测时域 $h_j$，模型维护一个可学习 horizon embedding $e_j$，并用它与共享特征共同构造 query：
-\begin{equation}
-q_j = W_q [b; e_j].
-\end{equation}
-该 query 对历史编码序列执行交叉注意力，得到该时域专属的时间摘要
-\begin{equation}
-\alpha_j = \mathrm{softmax}(q_j H^\top), \qquad
-z_j = \alpha_j H.
-\end{equation}
-最终解码特征为
-\begin{equation}
-d_j = \phi([b; z_j; e_j]),
-\end{equation}
-其中 $\phi(\cdot)$ 是一个小型前馈投影模块。与 GRU 基线相比，这一结构允许不同 horizon 从同一段历史中读取不同的信息子集。
-
-\subsection{所提出的多尺度 Horizon-Query Transformer}
-
-最终模型在单尺度 horizon-query decoder 的基础上，引入显式双时间尺度编码。其核心出发点是：30 分钟历史中既包含局部机动信息，也包含更粗粒度的阶段性变化，而 60--120 分钟预测往往更依赖后者。
+Horizon-Router 的核心思路是把“不同提前量需要不同历史证据”显式写进模型。模型首先用多尺度 horizon-query 编码器为每个预测时域读取细尺度和粗尺度历史证据；随后用三个 expert 表达不同时间尺度的运动信息，并由 horizon-level router 生成时域相关的融合权重。推理阶段，融合后的特征进入共享层级 H3 输出头，得到每个 horizon 上的细粒度区域概率。
 
 \begin{figure}[!t]
 \centering
 \includegraphics[width=\textwidth]{figures/fig1_method_architecture.pdf}
-\caption{所提出的多尺度 horizon-query H3 预测器概览。所有模型变体共享相同的层级 H3 输出头；最终模型在单尺度 horizon-query 结构上增加显式粗尺度时间分支。}
+\caption{Horizon-Router 方法总览。历史轨迹和轻量上下文首先被编码为 H3/父层 token 与数值特征；多尺度 horizon-query 编码器为每个预测时域检索细尺度和粗尺度历史证据；global、coarse-stable 和 local-causal 三个 expert 经 horizon-level router 融合后，进入 coarse、status 和 child heads，输出层级 H3 区域概率。}
 \label{fig:method-architecture-zh}
 \end{figure}
 
-具体地，细尺度分支先得到历史编码序列 $H^{(f)}$。然后按照 stride $=2$ 对细尺度序列做带掩码的局部均值池化，在本文的 6 步历史设置下得到 3 步粗尺度序列，再通过额外的单层 Transformer encoder 得到
-\begin{equation}
-H^{(c)} = \mathrm{Enc}_{\text{coarse}}(\mathrm{Pool}(H^{(f)})).
-\end{equation}
-同一个 horizon query $q_j$ 分别对细尺度和粗尺度序列进行注意力检索：
-\begin{equation}
-\alpha_j^{(f)} = \mathrm{softmax}(q_j {H^{(f)}}^\top), \qquad
-\alpha_j^{(c)} = \mathrm{softmax}(q_j {H^{(c)}}^\top),
-\end{equation}
-\begin{equation}
-z_j^{(f)} = \alpha_j^{(f)} H^{(f)}, \qquad
-z_j^{(c)} = \alpha_j^{(c)} H^{(c)}.
-\end{equation}
-最终的 horizon 专属解码特征写为
-\begin{equation}
-d_j = \phi_{\text{ms}}([b; z_j^{(f)}; z_j^{(c)}; e_j]).
-\end{equation}
-其中 $\phi_{\text{ms}}$ 是多尺度特征融合模块。所有粗区域头、状态头和条件子区域头都共享这一解码协议，只是输入的 $d_j$ 由单尺度或多尺度时间编码器决定。
+\subsection{输入表示与层级 H3 输出}
 
-\subsection{训练目标与可选正则}
+对每个历史时间步 $z_t=(r_t,p_t,u_t,m_t)$，模型分别学习输入区域 embedding、父层区域 embedding，并将数值特征和 mask 特征线性投影到同一隐空间：
+\begin{equation}
+\tilde{z}_t = [E_r(r_t); E_p(p_t); W_u u_t; W_m m_t].
+\end{equation}
+其中 $r_t$ 是输入分辨率 H3 cell，$p_t$ 是其父层 cell，$u_t$ 包含位置、位移、高度、速度、航向、时间间隔等数值特征，$m_t$ 包含 \texttt{observed\_flag} 与 \texttt{gap\_flag}。模型根据观测标记、缺口标记和 unknown token 构造时间有效掩码；该掩码被 Transformer attention、池化和局部编码模块共享，用于抑制填充片段和缺口补齐片段的影响。样本级上下文 $c$ 经过单独线性层投影后参与后续编码。
 
-在层级模型中，粗区域、子区域和状态三项损失都采用交叉熵，并仅在有效标签上累计。设 $\mathcal{V}$ 为可用 horizon 集合，则一个 mini-batch 的层级损失可写为
+对每个预测时域 $h_j$，层级输出头预测粗区域、状态和条件子区域：
+\begin{equation}
+p(y_j^{(c)}, y_j^{(f)}, s_j \mid X,c,h_j)
+=
+p(s_j \mid X,c,h_j)
+p(y_j^{(c)} \mid X,c,h_j)
+p(y_j^{(f)} \mid y_j^{(c)},X,c,h_j).
+\end{equation}
+训练时，子区域交叉熵使用真值粗区域标签作为条件，以稳定学习父子层级对应关系。推理时，模型从粗区域分布中选取 top-$K_j$ 个父区域，再计算每个父区域下的条件子分布，并将父层概率质量散射到细粒度 H3 cell。本文完整实验中使用的父层 top-$K$ 为 $[64,48,48,12]$。
+
+\subsection{多尺度 Horizon-Query 编码器}
+
+单一历史摘要难以同时服务 10 分钟和 120 分钟预测。本文先用带有效掩码的 Transformer encoder 得到细尺度历史序列
+\begin{equation}
+H^{(f)}=\mathrm{Enc}(W_z\tilde{Z}+P),
+\end{equation}
+并通过 masked mean pooling 与上下文投影拼接为共享基特征 $b$。随后，模型按 stride $=2$ 对 $H^{(f)}$ 做带掩码的局部均值池化，再经一个粗尺度 Transformer encoder 得到
+\begin{equation}
+H^{(c)} = \mathrm{Enc}_{c}(\mathrm{Pool}(H^{(f)})).
+\end{equation}
+
+对每个 horizon，模型维护可学习 horizon embedding $e_j$，并构造时域查询向量
+\begin{equation}
+q_j = W_q[b;e_j].
+\end{equation}
+该查询分别对细尺度序列和粗尺度序列做交叉注意力：
+\begin{equation}
+\alpha_j^{(f)}=\mathrm{softmax}(q_j {H^{(f)}}^\top),\qquad
+\alpha_j^{(c)}=\mathrm{softmax}(q_j {H^{(c)}}^\top),
+\end{equation}
+\begin{equation}
+z_j^{(f)}=\alpha_j^{(f)}H^{(f)},\qquad
+z_j^{(c)}=\alpha_j^{(c)}H^{(c)}.
+\end{equation}
+多尺度 horizon-query 特征写为
+\begin{equation}
+g_j=\phi_g([b;z_j^{(f)};z_j^{(c)};e_j]).
+\end{equation}
+这里的 $g_j$ 同时也是 Horizon-Router 中的 global expert：它保留完整历史、细尺度注意力和粗尺度注意力，是 warm-start 时最强的单路径预测分支。
+
+\subsection{Horizon-Router 三专家融合}
+
+Horizon-Router 在 global expert 之外加入两个分工明确的 expert。coarse-stable expert 只依赖粗尺度序列摘要和粗尺度注意力：
+\begin{equation}
+c_j=\phi_c([b^{(c)};z_j^{(c)};e_j]),
+\end{equation}
+其中 $b^{(c)}$ 是粗尺度序列的 masked mean pooling 与上下文投影拼接。该分支强调阶段性趋势和粗粒度稳定演化，主要服务中长时域预测。
+
+local-causal expert 只读取最近若干历史步，并使用因果 Transformer encoder 抑制对未来位置的泄漏。设最近局部序列为 $H^{(\ell)}$，则短时 horizon 的局部特征为
+\begin{equation}
+\ell_j=\phi_\ell([b;z_j^{(\ell)};e_j]),\qquad
+z_j^{(\ell)}=\mathrm{Attn}(q_j,H^{(\ell)}).
+\end{equation}
+在实现中，local-causal expert 只对预设的短时 horizon 激活；对更长 horizon，该分支通过 active expert mask 被置为不可用。这个边界很重要：局部机动对 10 或 30 分钟预测有价值，但不应被强行解释为 120 分钟区域需求的主证据。
+
+router 在每个 horizon 上读取三个 expert 特征和 horizon embedding，输出融合权重：
+\begin{equation}
+w_j=\mathrm{softmax}(R([g_j;c_j;\ell_j;e_j]))\in\mathbb{R}^3.
+\end{equation}
+最终解码特征为
+\begin{equation}
+d_j=w_{j,g}g_j+w_{j,c}c_j+w_{j,\ell}\ell_j.
+\end{equation}
+$d_j$ 被送入共享的粗区域头、状态头和条件子区域头。与简单加深单一路径编码器相比，这一结构让模型可以在时域层面选择历史证据来源，而不必要求所有 horizon 使用同一种时间摘要。
+
+\subsection{训练目标与路由约束}
+
+基础层级损失由粗区域、子区域和状态交叉熵组成。设 $\mathcal{V}$ 为 batch 中有效 horizon 集合，则
 \begin{equation}
 \mathcal{L}_{\text{hier}}
 =
 \frac{1}{|\mathcal{V}|}
-\sum_{j \in \mathcal{V}}
-\big(
+\sum_{j\in\mathcal{V}}
+\left(
 \mathcal{L}^{(j)}_{\text{coarse}}
 +
 \mathcal{L}^{(j)}_{\text{child}}
 +
 \mathcal{L}^{(j)}_{\text{status}}
-\big).
+\right).
 \end{equation}
-项目中还实现了一个可选的相邻 horizon 解码特征一致性项，即对 $d_j$ 与 $d_{j+1}$ 的均方差施加惩罚，并按相邻 horizon 间隔做缩放。但在 devsplit 和 full-scale 实验中，该项未带来稳定收益，因此最终模型设置为 $\lambda_{\text{cons}}=0$。
 
-\subsection{推理时后处理：Reachability 与 H3 Refinement}
+为了避免 router 过早偏向单一 expert，本文加入 loss-aware router supervision。对每个有效 horizon 和每个 active expert，模型临时用该 expert 特征通过共享输出头计算 expert loss $L_{j,e}$，并构造 soft target：
+\begin{equation}
+\hat{w}_{j,e}=
+\frac{\exp(-L_{j,e}/\tau)}
+{\sum_{e'\in\mathcal{A}_j}\exp(-L_{j,e'}/\tau)}.
+\end{equation}
+其中 $\mathcal{A}_j$ 是 horizon $j$ 上的 active expert 集合，$\tau$ 是 router supervision temperature。router supervision 最小化 $\hat{w}_j$ 与 $w_j$ 之间的 KL 散度。active expert mask 用于屏蔽长时域上的 local-causal expert，避免该分支在不适用的 horizon 上接受错误激励。
 
-完整推理流程包含两类后处理，但它们与主模型分开评估。第一类是 reachability filter。对每个 horizon，系统根据当前 H3 cell 中心与候选目标 cell 中心之间的球面距离构造可达性掩码；若某目标 cell 的距离超过
+本文还加入两个轻量约束。load balancing loss 将 router 权重拉向 active expert 上的均匀分布，防止单个 expert 长期占用全部概率质量；expert auxiliary loss 对 coarse-stable 和可用的 local-causal 分支施加输出头辅助监督，使这些分支即便未被 router 频繁选择也能保持可训练。global expert 通过主输出路径接受监督。
+
+最后，模型使用 horizon-wise teacher distillation 稳定概率输出。训练时，从若干与层级输出兼容的强神经专家中按 horizon 构造混合教师分布，并对学生模型的 coarse、child 和 status 概率施加 KL 蒸馏项。总目标可写为
+\begin{equation}
+\mathcal{L}
+=
+\mathcal{L}_{\text{hier}}
++
+\lambda_{\text{route}}\mathcal{L}_{\text{route}}
++
+\lambda_{\text{bal}}\mathcal{L}_{\text{bal}}
++
+\lambda_{\text{aux}}\mathcal{L}_{\text{aux}}
++
+\lambda_{\text{distill}}\mathcal{L}_{\text{distill}}.
+\end{equation}
+完整实验使用的权重为：$\lambda_{\text{distill}}=0.08$，状态蒸馏权重 $0.01$，$\lambda_{\text{route}}=0.08$，$\lambda_{\text{bal}}=0.02$，$\lambda_{\text{aux}}=0.05$，router supervision temperature 为 $0.7$。
+
+\subsection{推理概率支撑}
+
+推理阶段，模型先从粗区域分布中保留每个 horizon 的 top-$K_j$ 父区域，再在这些父区域下展开条件子区域概率，并将父层概率质量散射回细粒度 H3 cell。为避免将概率分配给明显超出运动学范围的区域，本文在所有模型上使用相同的可达性掩码。该掩码根据当前 H3 cell 中心到目标 cell 中心的球面距离构造；若某目标 cell 的距离超过
 \begin{equation}
 d_{\max}(h_j)
 =
@@ -137,4 +139,4 @@ v_{\max}\cdot 1.852 \cdot \frac{h_j}{60}
 +
 \Delta,
 \end{equation}
-则其概率被置零并重新归一化。本文默认采用 $v_{\max}=750$ knots、$\Delta=250$ km。第二类是 H3 neighbor refinement，它在评价阶段把部分细粒度概率质量按系数 $\alpha$ 扩散到局部 H3 邻居。由于它会显著改变概率校准，本文只把它作为消融分析，不把它计入最终主方法。
+则其概率被置零并重新归一化。本文默认采用 $v_{\max}=750$ knots、$\Delta=250$ km。该步骤只作为统一推理约束，不参与训练，也不作为 Horizon-Router 的方法贡献。
